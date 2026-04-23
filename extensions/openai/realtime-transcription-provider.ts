@@ -14,6 +14,7 @@ import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-i
 import WebSocket from "ws";
 import {
   asFiniteNumber,
+  captureOpenAIRealtimeWsClose,
   readRealtimeErrorDetail,
   resolveOpenAIProviderConfigRecord,
   trimToUndefined,
@@ -21,14 +22,18 @@ import {
 
 type OpenAIRealtimeTranscriptionProviderConfig = {
   apiKey?: string;
+  language?: string;
   model?: string;
+  prompt?: string;
   silenceDurationMs?: number;
   vadThreshold?: number;
 };
 
 type OpenAIRealtimeTranscriptionSessionConfig = RealtimeTranscriptionSessionCreateRequest & {
   apiKey: string;
+  language?: string;
   model: string;
+  prompt?: string;
   silenceDurationMs: number;
   vadThreshold: number;
 };
@@ -54,7 +59,9 @@ function normalizeProviderConfig(
         value: raw?.openaiApiKey,
         path: "plugins.entries.voice-call.config.streaming.openaiApiKey",
       }),
+    language: trimToUndefined(raw?.language),
     model: trimToUndefined(raw?.model) ?? trimToUndefined(raw?.sttModel),
+    prompt: trimToUndefined(raw?.prompt),
     silenceDurationMs: asFiniteNumber(raw?.silenceDurationMs),
     vadThreshold: asFiniteNumber(raw?.vadThreshold),
   };
@@ -140,6 +147,8 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
             input_audio_format: "g711_ulaw",
             input_audio_transcription: {
               model: this.config.model,
+              ...(this.config.language ? { language: this.config.language } : {}),
+              ...(this.config.prompt ? { prompt: this.config.prompt } : {}),
             },
             turn_detection: {
               type: "server_vad",
@@ -192,20 +201,12 @@ class OpenAIRealtimeTranscriptionSession implements RealtimeTranscriptionSession
       });
 
       this.ws.on("close", (code, reasonBuffer) => {
-        captureWsEvent({
+        captureOpenAIRealtimeWsClose({
           url,
-          direction: "local",
-          kind: "ws-close",
           flowId: this.flowId,
-          closeCode: typeof code === "number" ? code : undefined,
-          meta: {
-            provider: "openai",
-            capability: "realtime-transcription",
-            reason:
-              Buffer.isBuffer(reasonBuffer) && reasonBuffer.length > 0
-                ? reasonBuffer.toString("utf8")
-                : undefined,
-          },
+          capability: "realtime-transcription",
+          code,
+          reasonBuffer,
         });
         this.connected = false;
         if (this.closed) {
@@ -308,7 +309,9 @@ export function buildOpenAIRealtimeTranscriptionProvider(): RealtimeTranscriptio
       return new OpenAIRealtimeTranscriptionSession({
         ...req,
         apiKey,
+        language: config.language,
         model: config.model ?? "gpt-4o-transcribe",
+        prompt: config.prompt,
         silenceDurationMs: config.silenceDurationMs ?? 800,
         vadThreshold: config.vadThreshold ?? 0.5,
       });
