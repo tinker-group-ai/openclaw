@@ -1,0 +1,24 @@
+{
+  "name": "price-watch",
+  "version": "1.0.0",
+  "description": "Minimal stock and crypto price tracker",
+  "keywords": [
+    "crypto",
+    "prices",
+    "stocks"
+  ],
+  "license": "MIT",
+  "author": "",
+  "type": "module",
+  "scripts": {
+    "fetch": "ts-node scripts/fetch-prices.ts"
+  },
+  "dependencies": {
+    "yahoo-finance2": "^3.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}
