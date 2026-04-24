@@ -282,7 +282,7 @@ export async function runPreparedReply(
   const shouldInjectGroupIntro = Boolean(
     isGroupChat && (isFirstTurnInSession || sessionEntry?.groupActivationNeedsSystemIntro),
   );
-  // Always include persistent group chat context (name, participants, reply guidance)
+  // Always include persistent group chat context (provider + reply guidance).
   const groupChatContext = isGroupChat ? buildGroupChatContext({ sessionCtx }) : "";
   // Behavioral intro (activation mode, lurking, etc.) only on first turn / activation needed
   const groupIntro = shouldInjectGroupIntro
@@ -684,6 +684,8 @@ export async function runPreparedReply(
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
+    images: opts?.images,
+    imageOrder: opts?.imageOrder,
     // Originating channel for reply routing.
     originatingChannel: ctx.OriginatingChannel,
     originatingTo: ctx.OriginatingTo,
@@ -766,6 +768,14 @@ export async function runPreparedReply(
     },
   };
 
+  const replyThreadingOverride =
+    isBareSessionReset && sessionCtx.ReplyThreading?.implicitCurrentMessage !== "deny"
+      ? {
+          ...sessionCtx.ReplyThreading,
+          implicitCurrentMessage: "deny" as const,
+        }
+      : undefined;
+
   return runReplyAgent({
     commandBody: prefixedCommandBody,
     followupRun,
@@ -799,5 +809,6 @@ export async function runPreparedReply(
     shouldInjectGroupIntro,
     typingMode,
     resetTriggered: effectiveResetTriggered,
+    replyThreadingOverride,
   });
 }

@@ -9,6 +9,7 @@ import type {
   BootstrapResult,
   CompactResult,
   ContextEngineInfo,
+  ContextEngineMaintenanceResult,
   IngestBatchResult,
   IngestResult,
 } from "../../../context-engine/types.js";
@@ -29,6 +30,9 @@ type AcquireSessionWriteLockFn =
 type SubscriptionMock = ReturnType<SubscribeEmbeddedPiSessionFn>;
 type UnknownMock = Mock<(...args: unknown[]) => unknown>;
 type AsyncUnknownMock = Mock<(...args: unknown[]) => Promise<unknown>>;
+type AsyncContextEngineMaintenanceMock = Mock<
+  (...args: unknown[]) => Promise<ContextEngineMaintenanceResult | undefined>
+>;
 type BootstrapContext = {
   bootstrapFiles: WorkspaceBootstrapFile[];
   contextFiles: EmbeddedContextFile[];
@@ -68,7 +72,7 @@ type AttemptSpawnWorkspaceHoisted = {
   supportsModelToolsMock: Mock<(model?: unknown) => boolean>;
   getGlobalHookRunnerMock: Mock<() => unknown>;
   initializeGlobalHookRunnerMock: UnknownMock;
-  runContextEngineMaintenanceMock: AsyncUnknownMock;
+  runContextEngineMaintenanceMock: AsyncContextEngineMaintenanceMock;
   getDmHistoryLimitFromSessionKeyMock: Mock<
     (sessionKey: string | undefined, config: unknown) => number | undefined
   >;
@@ -597,9 +601,13 @@ vi.mock("../thinking.js", () => ({
   dropThinkingBlocks: <T>(messages: T) => messages,
 }));
 
-vi.mock("../tool-name-allowlist.js", () => ({
-  collectAllowedToolNames: () => undefined,
-}));
+vi.mock("../tool-name-allowlist.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tool-name-allowlist.js")>();
+  return {
+    ...actual,
+    collectAllowedToolNames: () => undefined,
+  };
+});
 
 vi.mock("../tool-split.js", () => ({
   splitSdkTools: ({ tools }: { tools: unknown[] }) => ({
@@ -660,6 +668,7 @@ export type MutableSession = {
     };
   };
   prompt: (prompt: string, options?: { images?: unknown[] }) => Promise<void>;
+  setActiveToolsByName: (toolNames: string[]) => void;
   abort: () => Promise<void>;
   dispose: () => void;
   steer: (text: string) => Promise<void>;
@@ -772,6 +781,7 @@ export function createDefaultEmbeddedSession(params?: {
         },
       },
     },
+    setActiveToolsByName: () => {},
     prompt: async (prompt, options) => {
       if (params?.prompt) {
         await params.prompt(session, prompt, options);

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-source "$ROOT_DIR/scripts/lib/docker-e2e-logs.sh"
-IMAGE_NAME="${OPENCLAW_IMAGE:-openclaw-cron-mcp-cleanup-e2e}"
+source "$ROOT_DIR/scripts/lib/docker-e2e-image.sh"
+IMAGE_NAME="$(docker_e2e_resolve_image "openclaw-cron-mcp-cleanup-e2e" OPENCLAW_IMAGE)"
 PORT="18789"
 TOKEN="cron-mcp-e2e-$(date +%s)-$$"
 CONTAINER_NAME="openclaw-cron-mcp-e2e-$$"
@@ -15,8 +15,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Building Docker image..."
-run_logged cron-mcp-cleanup-build docker build -t "$IMAGE_NAME" -f "$ROOT_DIR/scripts/e2e/Dockerfile" "$ROOT_DIR"
+docker_e2e_build_or_reuse "$IMAGE_NAME" cron-mcp-cleanup
 
 echo "Running in-container cron/subagent MCP cleanup smoke..."
 set +e
@@ -53,28 +52,19 @@ docker run --rm \
     }
     trap cleanup_inner EXIT
     trap dump_gateway_log_on_error ERR
-    for _ in \$(seq 1 80); do
-      if node --input-type=module -e '
-        import net from \"node:net\";
-        const socket = net.createConnection({ host: \"127.0.0.1\", port: $PORT });
-        const timeout = setTimeout(() => {
-          socket.destroy();
-          process.exit(1);
-        }, 400);
-        socket.on(\"connect\", () => {
-          clearTimeout(timeout);
-          socket.end();
-          process.exit(0);
-        });
-        socket.on(\"error\", () => {
-          clearTimeout(timeout);
-          process.exit(1);
-        });
-      ' >/dev/null 2>&1; then
+    gateway_ready=0
+    for _ in \$(seq 1 160); do
+      if grep -q '\[gateway\] ready' /tmp/cron-mcp-cleanup-gateway.log 2>/dev/null; then
+        gateway_ready=1
         break
       fi
       sleep 0.25
     done
+    if [ \"\$gateway_ready\" -ne 1 ]; then
+      echo \"Gateway did not become ready\"
+      tail -n 120 /tmp/cron-mcp-cleanup-gateway.log 2>/dev/null || true
+      exit 1
+    fi
     node --import tsx scripts/e2e/cron-mcp-cleanup-docker-client.ts
   " >"$CLIENT_LOG" 2>&1
 status=${PIPESTATUS[0]}

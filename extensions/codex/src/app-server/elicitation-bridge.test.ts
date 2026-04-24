@@ -2,12 +2,12 @@ import {
   callGatewayTool,
   embeddedAgentLog,
   type EmbeddedRunAttemptParams,
-} from "openclaw/plugin-sdk/agent-harness";
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCodexAppServerElicitationRequest } from "./elicitation-bridge.js";
 
-vi.mock("openclaw/plugin-sdk/agent-harness", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("openclaw/plugin-sdk/agent-harness")>()),
+vi.mock("openclaw/plugin-sdk/agent-harness-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/agent-harness-runtime")>()),
   callGatewayTool: vi.fn(),
 }));
 
@@ -83,6 +83,58 @@ describe("Codex app-server elicitation bridge", () => {
     mockCallGatewayTool
       .mockResolvedValueOnce({ id: "plugin:approval-1", status: "accepted" })
       .mockResolvedValueOnce({ id: "plugin:approval-1", decision: "allow-once" });
+
+    const result = await handleCodexAppServerElicitationRequest({
+      requestParams: buildApprovalElicitation(),
+      paramsForRun: createParams(),
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+
+    expect(result).toEqual({
+      action: "accept",
+      content: {
+        approve: true,
+      },
+      _meta: null,
+    });
+    expect(mockCallGatewayTool.mock.calls.map(([method]) => method)).toEqual([
+      "plugin.approval.request",
+      "plugin.approval.waitDecision",
+    ]);
+  });
+
+  it("does not trust request-time decisions for two-phase MCP approvals", async () => {
+    mockCallGatewayTool
+      .mockResolvedValueOnce({
+        id: "plugin:approval-untrusted",
+        status: "accepted",
+        decision: "allow-always",
+      })
+      .mockResolvedValueOnce({ id: "plugin:approval-untrusted", decision: "deny" });
+
+    const result = await handleCodexAppServerElicitationRequest({
+      requestParams: buildApprovalElicitation(),
+      paramsForRun: createParams(),
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+
+    expect(result).toEqual({ action: "decline", content: null, _meta: null });
+    expect(mockCallGatewayTool.mock.calls.map(([method]) => method)).toEqual([
+      "plugin.approval.request",
+      "plugin.approval.waitDecision",
+    ]);
+  });
+
+  it("does not treat inherited request-time MCP decisions as final", async () => {
+    const inheritedDecisionResult = Object.assign(Object.create({ decision: null }), {
+      id: "plugin:approval-inherited",
+      status: "accepted",
+    });
+    mockCallGatewayTool
+      .mockResolvedValueOnce(inheritedDecisionResult)
+      .mockResolvedValueOnce({ id: "plugin:approval-inherited", decision: "allow-once" });
 
     const result = await handleCodexAppServerElicitationRequest({
       requestParams: buildApprovalElicitation(),

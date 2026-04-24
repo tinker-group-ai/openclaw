@@ -13,7 +13,7 @@ const DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS = 60;
 function parseRetryAfterSeconds(headers: Headers): number | undefined {
   const retryAfterMs = headers.get("retry-after-ms");
   if (retryAfterMs) {
-    const milliseconds = parseFloat(retryAfterMs);
+    const milliseconds = Number.parseFloat(retryAfterMs);
     if (Number.isFinite(milliseconds) && milliseconds >= 0) {
       return milliseconds / 1000;
     }
@@ -24,7 +24,7 @@ function parseRetryAfterSeconds(headers: Headers): number | undefined {
     return undefined;
   }
 
-  const seconds = parseFloat(retryAfter);
+  const seconds = Number.parseFloat(retryAfter);
   if (Number.isFinite(seconds) && seconds >= 0) {
     return seconds;
   }
@@ -47,7 +47,7 @@ function resolveMaxSdkRetryWaitSeconds(): number | undefined {
     return undefined;
   }
 
-  const seconds = parseFloat(raw);
+  const seconds = Number.parseFloat(raw);
   if (Number.isFinite(seconds) && seconds > 0) {
     return seconds;
   }
@@ -150,7 +150,7 @@ function resolveModelRequestPolicy(model: Model<Api>) {
   });
 }
 
-export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
+export function buildGuardedModelFetch(model: Model<Api>, timeoutMs?: number): typeof fetch {
   const requestConfig = resolveModelRequestPolicy(model);
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
   return async (input, init) => {
@@ -185,6 +185,7 @@ export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
         },
       },
       dispatcherPolicy,
+      timeoutMs,
       // Provider transport intentionally keeps the secure default and never
       // replays unsafe request bodies across cross-origin redirects.
       allowCrossOriginUnsafeRedirectReplay: false,

@@ -4,6 +4,7 @@ import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { OperatorScope } from "../gateway/operator-scopes.js";
 import type { GatewayRequestHandlers } from "../gateway/server-methods/types.js";
 import type { HookEntry } from "../hooks/types.js";
+import type { JsonSchemaObject } from "../shared/json-schema.types.js";
 import type { CodexAppServerExtensionFactory } from "./codex-app-server-extension-types.js";
 import type { PluginActivationSource } from "./config-state.js";
 import type {
@@ -26,6 +27,7 @@ import type {
   OpenClawPluginCliRegistrar,
   OpenClawPluginCommandDefinition,
   OpenClawPluginGatewayRuntimeScopeSurface,
+  OpenClawGatewayDiscoveryService,
   OpenClawPluginHttpRouteAuth,
   OpenClawPluginHttpRouteHandler,
   OpenClawPluginHttpRouteMatch,
@@ -186,6 +188,14 @@ export type PluginServiceRegistration = {
   rootDir?: string;
 };
 
+export type PluginGatewayDiscoveryServiceRegistration = {
+  pluginId: string;
+  pluginName?: string;
+  service: OpenClawGatewayDiscoveryService;
+  source: string;
+  rootDir?: string;
+};
+
 export type PluginReloadRegistration = {
   pluginId: string;
   pluginName?: string;
@@ -270,12 +280,13 @@ export type PluginRecord = {
   gatewayMethods: string[];
   cliCommands: string[];
   services: string[];
+  gatewayDiscoveryServiceIds: string[];
   commands: string[];
   httpRoutes: number;
   hookCount: number;
   configSchema: boolean;
   configUiHints?: Record<string, PluginConfigUiHint>;
-  configJsonSchema?: Record<string, unknown>;
+  configJsonSchema?: JsonSchemaObject;
   contracts?: PluginManifestContracts;
   memorySlotSelected?: boolean;
 };
@@ -311,6 +322,7 @@ export type PluginRegistry = {
   nodeHostCommands?: PluginNodeHostCommandRegistration[];
   securityAuditCollectors?: PluginSecurityAuditCollectorRegistration[];
   services: PluginServiceRegistration[];
+  gatewayDiscoveryServices: PluginGatewayDiscoveryServiceRegistration[];
   commands: PluginCommandRegistration[];
   conversationBindingResolvedHandlers: PluginConversationBindingResolvedHandlerRegistration[];
   diagnostics: PluginDiagnostic[];

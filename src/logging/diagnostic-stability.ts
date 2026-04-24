@@ -235,6 +235,46 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.count = event.count;
       record.pairedToolName = event.pairedToolName;
       break;
+    case "tool.execution.started":
+      record.toolName = event.toolName;
+      break;
+    case "tool.execution.completed":
+      record.toolName = event.toolName;
+      record.durationMs = event.durationMs;
+      break;
+    case "tool.execution.error":
+      record.toolName = event.toolName;
+      record.durationMs = event.durationMs;
+      record.reason = event.errorCategory;
+      break;
+    case "run.started":
+      record.provider = event.provider;
+      record.model = event.model;
+      record.channel = event.channel;
+      break;
+    case "run.completed":
+      record.provider = event.provider;
+      record.model = event.model;
+      record.channel = event.channel;
+      record.durationMs = event.durationMs;
+      record.outcome = event.outcome;
+      assignReasonCode(record, event.errorCategory);
+      break;
+    case "model.call.started":
+      record.provider = event.provider;
+      record.model = event.model;
+      break;
+    case "model.call.completed":
+      record.provider = event.provider;
+      record.model = event.model;
+      record.durationMs = event.durationMs;
+      break;
+    case "model.call.error":
+      record.provider = event.provider;
+      record.model = event.model;
+      record.durationMs = event.durationMs;
+      record.reason = event.errorCategory;
+      break;
     case "diagnostic.memory.sample":
       record.memory = copyMemory(event.memory);
       break;
@@ -380,7 +420,7 @@ function parseOptionalNonNegativeInteger(value: unknown, field: string): number 
     return undefined;
   }
   const parsed =
-    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(`${field} must be a non-negative integer`);
   }

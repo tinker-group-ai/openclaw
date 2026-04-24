@@ -40,6 +40,8 @@ import type {
 } from "../realtime-transcription/provider-types.js";
 import type {
   RealtimeVoiceBridge,
+  RealtimeVoiceBrowserSession,
+  RealtimeVoiceBrowserSessionCreateRequest,
   RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceProviderConfig,
   RealtimeVoiceProviderConfiguredContext,
@@ -48,6 +50,7 @@ import type {
 } from "../realtime-voice/provider-types.js";
 import type { RuntimeEnv } from "../runtime.js";
 import type { SecurityAuditFinding } from "../security/audit.types.js";
+import type { JsonSchemaObject } from "../shared/json-schema.types.js";
 import type {
   SpeechDirectiveTokenParseContext,
   SpeechDirectiveTokenParseResult,
@@ -68,6 +71,7 @@ import type { VideoGenerationProvider } from "../video-generation/types.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import type {
   CliBackendAuthEpochMode,
+  CliBackendNormalizeConfigContext,
   CliBackendPreparedExecution,
   CliBackendPrepareExecutionContext,
   CliBackendPlugin,
@@ -147,6 +151,7 @@ export type {
 } from "./conversation-binding.types.js";
 export type {
   CliBackendAuthEpochMode,
+  CliBackendNormalizeConfigContext,
   CliBackendPreparedExecution,
   CliBackendPrepareExecutionContext,
   CliBackendPlugin,
@@ -221,7 +226,7 @@ export type OpenClawPluginConfigSchema = {
   parse?: (value: unknown) => unknown;
   validate?: (value: unknown) => PluginConfigValidation;
   uiHints?: Record<string, PluginConfigUiHint>;
-  jsonSchema?: Record<string, unknown>;
+  jsonSchema?: JsonSchemaObject;
 };
 
 export type ProviderAuthKind = "oauth" | "api_key" | "token" | "device_code" | "custom";
@@ -239,6 +244,12 @@ export type ProviderAuthResult = {
   configPatch?: Partial<OpenClawConfig>;
   defaultModel?: string;
   notes?: string[];
+  /**
+   * Opt in to replace `agents.defaults.models` wholesale with the patch map.
+   * Default behavior merges the map so other providers' entries survive.
+   * Set only from migrations that intentionally rename/remove model keys.
+   */
+  replaceDefaultModels?: boolean;
 };
 
 /** Interactive auth context passed to provider login/setup methods. */
@@ -587,6 +598,53 @@ export type ProviderPrepareExtraParamsContext = {
   modelId: string;
   extraParams?: Record<string, unknown>;
   thinkingLevel?: ThinkLevel;
+};
+
+export type ProviderExtraParamsForTransportContext = Omit<
+  ProviderPrepareExtraParamsContext,
+  "extraParams"
+> & {
+  model?: ProviderRuntimeModel;
+  transport?: "sse" | "websocket" | "auto";
+  extraParams: Record<string, unknown>;
+};
+
+export type ProviderExtraParamsForTransportResult = {
+  patch?: Record<string, unknown> | null;
+};
+
+export type ProviderResolvePromptOverlayContext = ProviderSystemPromptContributionContext & {
+  baseOverlay?: ProviderSystemPromptContribution;
+};
+
+export type ProviderFollowupFallbackRouteContext = {
+  config?: OpenClawConfig;
+  agentDir?: string;
+  workspaceDir?: string;
+  provider: string;
+  modelId: string;
+  payload: ReplyPayload;
+  originatingChannel?: string;
+  originatingTo?: string;
+  originRoutable: boolean;
+  dispatcherAvailable: boolean;
+};
+
+export type ProviderFollowupFallbackRouteResult = {
+  route?: "origin" | "dispatcher" | "drop";
+  reason?: string;
+};
+
+export type ProviderResolveAuthProfileIdContext = {
+  config?: OpenClawConfig;
+  agentDir?: string;
+  workspaceDir?: string;
+  provider: string;
+  modelId: string;
+  preferredProfileId?: string;
+  lockedProfileId?: string;
+  profileOrder: string[];
+  authStore: AuthProfileStore;
 };
 
 export type ProviderReplaySanitizeMode = "full" | "images-only";
@@ -1259,6 +1317,15 @@ export type ProviderPlugin = {
     ctx: ProviderPrepareExtraParamsContext,
   ) => Record<string, unknown> | null | undefined;
   /**
+   * Provider-owned request params after transport/model resolution.
+   *
+   * Use this for transport-family request knobs that should be keyed by the
+   * resolved model API/transport rather than a hardcoded core allowlist.
+   */
+  extraParamsForTransport?: (
+    ctx: ProviderExtraParamsForTransportContext,
+  ) => ProviderExtraParamsForTransportResult | null | undefined;
+  /**
    * Provider-owned transport factory.
    *
    * Use this when the provider needs a fully custom StreamFn instead of a
@@ -1454,6 +1521,30 @@ export type ProviderPlugin = {
     ctx: ProviderSystemPromptContributionContext,
   ) => ProviderSystemPromptContribution | null | undefined;
   /**
+   * Provider-owned GPT/model prompt overlay seam.
+   *
+   * Runs after OpenClaw's built-in overlay is resolved and before the
+   * provider's regular system-prompt contribution is merged.
+   */
+  resolvePromptOverlay?: (
+    ctx: ProviderResolvePromptOverlayContext,
+  ) => ProviderSystemPromptContribution | null | undefined;
+  /**
+   * Provider-owned fallback route override for model/profile failure handling.
+   *
+   * Return undefined/null to keep OpenClaw's default fallback policy.
+   */
+  followupFallbackRoute?: (
+    ctx: ProviderFollowupFallbackRouteContext,
+  ) => ProviderFollowupFallbackRouteResult | null | undefined;
+  /**
+   * Provider-owned auth profile resolver.
+   *
+   * Return a profile id from the supplied order to prefer it for this attempt;
+   * invalid or missing ids are ignored by core.
+   */
+  resolveAuthProfileId?: (ctx: ProviderResolveAuthProfileIdContext) => string | null | undefined;
+  /**
    * Provider-owned final system-prompt transform.
    *
    * Use this sparingly when a provider transport needs small compatibility
@@ -1576,9 +1667,9 @@ export type ProviderPlugin = {
     | null
     | undefined;
   /**
-   * @deprecated Use `resolveExternalAuthProfiles`.
-   *
-   * Kept for compatibility with existing provider plugins.
+   * @deprecated Declare `contracts.externalAuthProviders` in the plugin manifest
+   * and implement `resolveExternalAuthProfiles` instead. This compatibility hook
+   * is loaded through a slower fallback path and will be removed in a future release.
    */
   resolveExternalOAuthProfiles?: (
     ctx: ProviderResolveExternalOAuthProfilesContext,
@@ -1652,6 +1743,9 @@ export type RealtimeVoiceProviderPlugin = {
   resolveConfig?: (ctx: RealtimeVoiceProviderResolveConfigContext) => RealtimeVoiceProviderConfig;
   isConfigured: (ctx: RealtimeVoiceProviderConfiguredContext) => boolean;
   createBridge: (req: RealtimeVoiceBridgeCreateRequest) => RealtimeVoiceBridge;
+  createBrowserSession?: (
+    req: RealtimeVoiceBrowserSessionCreateRequest,
+  ) => Promise<RealtimeVoiceBrowserSession>;
 };
 
 export type PluginRealtimeVoiceProviderEntry = RealtimeVoiceProviderPlugin & {
@@ -1761,10 +1855,6 @@ export type PluginInteractiveHandlerResult = {
   handled?: boolean;
 } | void;
 
-type BivariantInteractiveHandler<TContext, TResult> = {
-  bivarianceHack: (ctx: TContext) => Promise<TResult> | TResult;
-}["bivarianceHack"];
-
 export type PluginInteractiveRegistration<
   TContext = unknown,
   TChannel extends string = string,
@@ -1772,7 +1862,7 @@ export type PluginInteractiveRegistration<
 > = {
   channel: TChannel;
   namespace: string;
-  handler: BivariantInteractiveHandler<TContext, TResult>;
+  handler: (ctx: TContext) => Promise<TResult> | TResult;
 };
 
 export type PluginInteractiveHandlerRegistration = PluginInteractiveRegistration;
@@ -1841,6 +1931,25 @@ export type OpenClawPluginSecurityAuditContext = {
 export type OpenClawPluginSecurityAuditCollector = (
   ctx: OpenClawPluginSecurityAuditContext,
 ) => SecurityAuditFinding[] | Promise<SecurityAuditFinding[]>;
+
+export type OpenClawGatewayDiscoveryAdvertiseContext = {
+  machineDisplayName: string;
+  gatewayPort: number;
+  gatewayTlsEnabled: boolean;
+  gatewayTlsFingerprintSha256?: string;
+  canvasPort?: number;
+  tailnetDns?: string;
+  sshPort?: number;
+  cliPath?: string;
+  minimal: boolean;
+};
+
+export type OpenClawGatewayDiscoveryService = {
+  id: string;
+  advertise: (
+    ctx: OpenClawGatewayDiscoveryAdvertiseContext,
+  ) => void | Promise<void | { stop?: () => void | Promise<void> }>;
+};
 
 /** Context passed to long-lived plugin services. */
 export type OpenClawPluginServiceContext = {
@@ -1959,6 +2068,8 @@ export type OpenClawPluginApi = {
   registerNodeHostCommand: (command: OpenClawPluginNodeHostCommand) => void;
   registerSecurityAuditCollector: (collector: OpenClawPluginSecurityAuditCollector) => void;
   registerService: (service: OpenClawPluginService) => void;
+  /** Register a local gateway discovery advertiser such as mDNS/Bonjour. */
+  registerGatewayDiscoveryService: (service: OpenClawGatewayDiscoveryService) => void;
   /** Register a text-only CLI backend used by the local CLI runner. */
   registerCliBackend: (backend: CliBackendPlugin) => void;
   /** Register plugin-owned prompt/message compatibility text transforms. */
