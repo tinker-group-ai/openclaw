@@ -8,11 +8,6 @@ import {
   resolveBundledPluginSources,
 } from "../plugins/bundled-sources.js";
 import { enablePluginInConfig, type PluginEnableResult } from "../plugins/enable.js";
-import {
-  loadPluginInstallRecords,
-  recordPluginInstallInRecords,
-  writePersistedPluginInstallLedger,
-} from "../plugins/install-ledger-store.js";
 import { installPluginFromNpmSpec } from "../plugins/install.js";
 import { buildNpmResolutionInstallFields, recordPluginInstall } from "../plugins/installs.js";
 import type { PluginPackageInstall } from "../plugins/manifest.js";
@@ -140,14 +135,6 @@ function formatPortableLocalPath(localPath: string, workspaceDir?: string): stri
   return undefined;
 }
 
-async function persistOnboardingPluginInstallRecord(params: {
-  cfg: OpenClawConfig;
-  install: Parameters<typeof recordPluginInstallInRecords>[1];
-}) {
-  const records = await loadPluginInstallRecords({ config: params.cfg });
-  await writePersistedPluginInstallLedger(recordPluginInstallInRecords(records, params.install));
-}
-
 async function recordLocalPluginInstall(params: {
   cfg: OpenClawConfig;
   entry: OnboardingPluginInstallEntry;
@@ -162,10 +149,6 @@ async function recordLocalPluginInstall(params: {
     ...(sourcePath ? { sourcePath } : {}),
     ...(params.npmSpec ? { spec: params.npmSpec } : {}),
   } as const;
-  await persistOnboardingPluginInstallRecord({
-    cfg: params.cfg,
-    install,
-  });
   return recordPluginInstall(params.cfg, install);
 }
 
@@ -439,6 +422,7 @@ export async function ensureOnboardingPluginInstalled(params: {
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
   workspaceDir?: string;
+  promptInstall?: boolean;
 }): Promise<OnboardingPluginInstallResult> {
   const { entry, prompter, runtime, workspaceDir } = params;
   let next = params.cfg;
@@ -459,12 +443,15 @@ export async function ensureOnboardingPluginInstalled(params: {
     bundledLocalPath,
     hasNpmSpec: Boolean(npmSpec),
   });
-  const choice = await promptInstallChoice({
-    entry,
-    localPath,
-    defaultChoice,
-    prompter,
-  });
+  const choice =
+    params.promptInstall === false
+      ? defaultChoice
+      : await promptInstallChoice({
+          entry,
+          localPath,
+          defaultChoice,
+          prompter,
+        });
 
   if (choice === "skip") {
     return {
@@ -570,10 +557,6 @@ export async function ensureOnboardingPluginInstalled(params: {
       version: result.version,
       ...buildNpmResolutionInstallFields(result.npmResolution),
     } as const;
-    await persistOnboardingPluginInstallRecord({
-      cfg: next,
-      install,
-    });
     next = recordPluginInstall(next, install);
     return {
       cfg: next,

@@ -64,6 +64,7 @@ observation-only.
 - `before_prompt_build` — add dynamic context or system-prompt text before the model call
 - `before_agent_start` — compatibility-only combined phase; prefer the two hooks above
 - **`before_agent_reply`** — short-circuit the model turn with a synthetic reply or silence
+- **`before_agent_finalize`** — inspect the natural final answer and request one more model pass
 - `agent_end` — observe final messages, success state, and run duration
 
 **Conversation observation**
@@ -111,8 +112,8 @@ observation-only.
 - `event.params`
 - optional `event.runId`
 - optional `event.toolCallId`
-- context fields such as `ctx.agentId`, `ctx.sessionKey`, `ctx.sessionId`, and
-  diagnostic `ctx.trace`
+- context fields such as `ctx.agentId`, `ctx.sessionKey`, `ctx.sessionId`,
+  `ctx.runId`, `ctx.jobId` (set on cron-driven runs), and diagnostic `ctx.trace`
 
 It can return:
 
@@ -147,6 +148,21 @@ Rules:
 - `onResolution` receives the resolved approval decision — `allow-once`,
   `allow-always`, `deny`, `timeout`, or `cancelled`.
 
+### Tool result persistence
+
+Tool results can include structured `details` for UI rendering, diagnostics,
+media routing, or plugin-owned metadata. Treat `details` as runtime metadata,
+not prompt content:
+
+- OpenClaw strips `toolResult.details` before provider replay and compaction
+  input so metadata does not become model context.
+- Persisted session entries keep only bounded `details`. Oversized details are
+  replaced with a compact summary and `persistedDetailsTruncated: true`.
+- `tool_result_persist` and `before_message_write` run before the final
+  persistence cap. Hooks should still keep returned `details` small and avoid
+  placing prompt-relevant text only in `details`; put model-visible tool output
+  in `content`.
+
 ## Prompt and model hooks
 
 Use the phase-specific hooks for new plugins:
@@ -162,6 +178,9 @@ so your plugin does not depend on a legacy combined phase.
 
 `before_agent_start` and `agent_end` include `event.runId` when OpenClaw can
 identify the active run. The same value is also available on `ctx.runId`.
+Cron-driven runs also expose `ctx.jobId` (the originating cron job id) so
+plugin hooks can scope metrics, side effects, or state to a specific scheduled
+job.
 
 Use `model_call_started` and `model_call_ended` for provider-call telemetry
 that should not receive raw prompts, history, responses, headers, request
@@ -170,7 +189,16 @@ bodies, or provider request IDs. These hooks include stable metadata such as
 `durationMs`/`outcome`, and `upstreamRequestIdHash` when OpenClaw can derive a
 bounded provider request-id hash.
 
-Non-bundled plugins that need `llm_input`, `llm_output`, or `agent_end` must set:
+`before_agent_finalize` runs only when a harness is about to accept a natural
+final assistant answer. It is not the `/stop` cancellation path and does not
+run when the user aborts a turn. Return `{ action: "revise", reason }` to ask
+the harness for one more model pass before finalization, `{ action:
+"finalize", reason? }` to force finalization, or omit a result to continue.
+Codex native `Stop` hooks are relayed into this hook as OpenClaw
+`before_agent_finalize` decisions.
+
+Non-bundled plugins that need `llm_input`, `llm_output`,
+`before_agent_finalize`, or `agent_end` must set:
 
 ```json
 {

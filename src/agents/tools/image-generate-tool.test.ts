@@ -8,12 +8,28 @@ let webMedia: typeof import("../../media/web-media.js");
 let createImageGenerateTool: typeof import("./image-generate-tool.js").createImageGenerateTool;
 let resolveImageGenerationModelConfigForTool: typeof import("./image-generate-tool.js").resolveImageGenerationModelConfigForTool;
 
+function hasStubbedImageProviderAuth(providerId: string): boolean {
+  if (providerId === "openai") {
+    return Boolean(process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_API_KEYS?.trim());
+  }
+  if (providerId === "google") {
+    return Boolean(
+      process.env.GEMINI_API_KEY?.trim() ||
+      process.env.GEMINI_API_KEYS?.trim() ||
+      process.env.GOOGLE_API_KEY?.trim() ||
+      process.env.GOOGLE_API_KEYS?.trim(),
+    );
+  }
+  return false;
+}
+
 function stubImageGenerationProviders() {
   vi.spyOn(imageGenerationRuntime, "listRuntimeImageGenerationProviders").mockReturnValue([
     {
       id: "google",
       defaultModel: "gemini-3.1-flash-image-preview",
       models: ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"],
+      isConfigured: () => hasStubbedImageProviderAuth("google"),
       capabilities: {
         generate: {
           maxCount: 4,
@@ -39,6 +55,7 @@ function stubImageGenerationProviders() {
       id: "openai",
       defaultModel: "gpt-image-1",
       models: ["gpt-image-1"],
+      isConfigured: () => hasStubbedImageProviderAuth("openai"),
       capabilities: {
         generate: {
           maxCount: 4,
@@ -225,7 +242,8 @@ describe("createImageGenerateTool", () => {
     const tool = requireImageGenerateTool(createImageGenerateTool({ config: {} }));
 
     expect(tool.description).toContain('outputFormat="png" or "webp"');
-    expect(tool.description).toContain('openai.background="transparent"');
+    expect(tool.description).toContain('background="transparent"');
+    expect(tool.description).toContain("openai.background");
     expect(tool.description).toContain("gpt-image-1.5");
     expect(JSON.stringify(tool.parameters)).toContain("openai/gpt-image-1.5");
   });

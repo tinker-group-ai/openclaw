@@ -53,6 +53,13 @@ function writeSessionJsonl(fileName: string, records: readonly unknown[]): strin
   return filePath;
 }
 
+function buildSessionEntryWithoutStoreClassification(filePath: string) {
+  return buildSessionEntry(filePath, {
+    generatedByCronRun: false,
+    generatedByDreamingNarrative: false,
+  });
+}
+
 describe("listSessionFilesForAgent", () => {
   it("includes reset and deleted transcripts in session file listing", async () => {
     const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
@@ -104,7 +111,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
 
     // The content should have 3 lines (3 message records)
@@ -131,7 +138,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "empty-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
     expect(entry!.content).toBe("");
     expect(entry!.lineMap).toEqual([]);
@@ -149,7 +156,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "gaps.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
     expect(entry!.lineMap).toEqual([3, 5]);
     expect(entry!.messageTimestampsMs).toEqual([0, 0]);
@@ -174,7 +181,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "timestamps.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
     expect(entry!.messageTimestampsMs).toEqual([
       Date.parse("2026-04-05T10:00:00.000Z"),
@@ -215,7 +222,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "enveloped-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
 
     const contentLines = entry!.content.split("\n");
@@ -253,7 +260,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "enveloped-session-array.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
     expect(entry!.content).toBe("User: Actual user text");
   });
@@ -271,7 +278,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "wrapped-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
 
     const contentLines = entry!.content.split("\n");
@@ -293,7 +300,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "hard-wrapped-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
 
     const contentLines = entry!.content.split("\n");
@@ -317,7 +324,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "surrogate-safe-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
 
     const contentLines = entry!.content.split("\n");
@@ -344,7 +351,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "assistant-sentinel.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
     expect(entry).not.toBeNull();
     expect(entry!.content).toBe(`Assistant: ${assistantText}`);
   });
@@ -367,7 +374,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "dreaming-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
 
     expect(entry).not.toBeNull();
     expect(entry?.generatedByDreamingNarrative).toBe(true);
@@ -478,7 +485,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "dreaming-prompt-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
 
     expect(entry).not.toBeNull();
     expect(entry?.generatedByDreamingNarrative).toBeUndefined();
@@ -591,11 +598,29 @@ describe("buildSessionEntry", () => {
         content: "User: Actual user text",
         lineMap: [3],
       },
+      {
+        name: "inter-session user provenance",
+        fileName: "inter-session-session.jsonl",
+        records: [
+          {
+            type: "message",
+            message: {
+              role: "user",
+              content: "A background task completed. Internal relay text.",
+              provenance: { kind: "inter_session", sourceTool: "subagent_announce" },
+            },
+          },
+          { type: "message", message: { role: "assistant", content: "User-facing summary." } },
+          { type: "message", message: { role: "user", content: "Actual user follow-up." } },
+        ],
+        content: "Assistant: User-facing summary.\nUser: Actual user follow-up.",
+        lineMap: [2, 3],
+      },
     ] as const;
 
     for (const testCase of cases) {
       const filePath = writeSessionJsonl(testCase.fileName, testCase.records);
-      const entry = await buildSessionEntry(filePath);
+      const entry = await buildSessionEntryWithoutStoreClassification(filePath);
 
       expect(entry, testCase.name).not.toBeNull();
       expect(entry?.content, testCase.name).toBe(testCase.content);
@@ -626,7 +651,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "spoof-attempt-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
 
     expect(entry).not.toBeNull();
     expect(entry?.content).toContain(
@@ -636,7 +661,10 @@ describe("buildSessionEntry", () => {
 
   it("skips deleted and checkpoint transcripts for dreaming ingestion", async () => {
     const deletedPath = path.join(tmpDir, "ordinary.jsonl.deleted.2026-02-16T22-27-33.000Z");
-    const checkpointPath = path.join(tmpDir, "ordinary.checkpoint.abc123.jsonl");
+    const checkpointPath = path.join(
+      tmpDir,
+      "ordinary.checkpoint.11111111-1111-4111-8111-111111111111.jsonl",
+    );
     const content = JSON.stringify({
       type: "message",
       message: { role: "user", content: "This should never reach the dreaming corpus." },
@@ -644,8 +672,8 @@ describe("buildSessionEntry", () => {
     fsSync.writeFileSync(deletedPath, content);
     fsSync.writeFileSync(checkpointPath, content);
 
-    const deletedEntry = await buildSessionEntry(deletedPath);
-    const checkpointEntry = await buildSessionEntry(checkpointPath);
+    const deletedEntry = await buildSessionEntryWithoutStoreClassification(deletedPath);
+    const checkpointEntry = await buildSessionEntryWithoutStoreClassification(checkpointPath);
 
     expect(deletedEntry).not.toBeNull();
     expect(deletedEntry?.content).toBe("");
@@ -672,7 +700,7 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "substring-marker-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
+    const entry = await buildSessionEntryWithoutStoreClassification(filePath);
 
     expect(entry).not.toBeNull();
     expect(entry?.generatedByDreamingNarrative).toBeUndefined();

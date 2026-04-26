@@ -263,43 +263,50 @@ afterEach(() => {
 
 describe("grouped chat rendering", () => {
   it("positions delete confirm by message side", () => {
-    const renderDeletable = (role: "user" | "assistant") => {
-      const container = document.createElement("div");
-      clearDeleteConfirmSkip();
-      renderGroupedMessage(
-        container,
-        {
-          role,
-          content: `hello from ${role}`,
-          timestamp: 1000,
-        },
-        role,
-        { onDelete: vi.fn() },
-      );
-      return container;
-    };
+    const container = document.createElement("div");
+    clearDeleteConfirmSkip();
+    renderMessageGroups(
+      container,
+      [
+        createMessageGroup(
+          {
+            role: "user",
+            content: "hello from user",
+            timestamp: 1000,
+          },
+          "user",
+        ),
+        createMessageGroup(
+          {
+            role: "assistant",
+            content: "hello from assistant",
+            timestamp: 1001,
+          },
+          "assistant",
+        ),
+      ],
+      { onDelete: vi.fn() },
+    );
 
-    const userContainer = renderDeletable("user");
-    const userDeleteButton = userContainer.querySelector<HTMLButtonElement>(
+    const userDeleteButton = container.querySelector<HTMLButtonElement>(
       ".chat-group.user .chat-group-delete",
     );
     expect(userDeleteButton).not.toBeNull();
     userDeleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    const userConfirm = userContainer.querySelector<HTMLElement>(
+    const userConfirm = container.querySelector<HTMLElement>(
       ".chat-group.user .chat-delete-confirm",
     );
     expect(userConfirm).not.toBeNull();
     expect(userConfirm?.classList.contains("chat-delete-confirm--left")).toBe(true);
 
-    const assistantContainer = renderDeletable("assistant");
-    const assistantDeleteButton = assistantContainer.querySelector<HTMLButtonElement>(
+    const assistantDeleteButton = container.querySelector<HTMLButtonElement>(
       ".chat-group.assistant .chat-group-delete",
     );
     expect(assistantDeleteButton).not.toBeNull();
     assistantDeleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    const assistantConfirm = assistantContainer.querySelector<HTMLElement>(
+    const assistantConfirm = container.querySelector<HTMLElement>(
       ".chat-group.assistant .chat-delete-confirm",
     );
     expect(assistantConfirm).not.toBeNull();
@@ -715,11 +722,16 @@ describe("grouped chat rendering", () => {
       id: "user-history-document",
       role: "user",
       content: "",
-      MediaPath: "/tmp/openclaw/user-upload.pdf",
+      MediaPath: "/__openclaw__/media/user-upload.pdf",
       MediaType: "application/pdf",
       timestamp: Date.now(),
     });
     expect(container.querySelector(".chat-message-image")).toBeNull();
+    const documentLink = container.querySelector<HTMLAnchorElement>(
+      ".chat-assistant-attachment-card__link",
+    );
+    expect(documentLink?.textContent).toContain("user-upload.pdf");
+    expect(documentLink?.getAttribute("href")).toBe("/__openclaw__/media/user-upload.pdf");
   });
 
   it("fetches managed chat images with auth and renders blob previews", async () => {
