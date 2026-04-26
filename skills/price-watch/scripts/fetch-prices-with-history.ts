@@ -10,15 +10,12 @@ interface WatchList {
 interface PriceData {
   symbol: string;
   price: number;
-  change: number;
-  changePercent: number;
+  change24h: number;
+  change24hPercent: number;
+  dayOpen: number;
+  weekOpen: number;
   type: "stock" | "crypto";
   timestamp: number;
-}
-
-interface PriceSnapshot {
-  timestamp: number;
-  prices: Record<string, number>;
 }
 
 const readWatchList = (filePath: string): WatchList => {
@@ -29,44 +26,41 @@ const readWatchList = (filePath: string): WatchList => {
   return JSON.parse(data);
 };
 
-const getSnapshotPath = (watchListPath: string): string => {
-  const dir = path.dirname(watchListPath);
-  const baseName = path.basename(watchListPath, ".json");
-  return path.join(dir, `.${baseName}-snapshot.json`);
-};
-
-const readSnapshot = (filePath: string): PriceSnapshot | null => {
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
-  } catch {
-    return null;
-  }
-};
-
-const saveSnapshot = (filePath: string, prices: PriceData[]): void => {
-  const snapshot: PriceSnapshot = {
-    timestamp: Date.now(),
-    prices: Object.fromEntries(prices.map((p) => [p.symbol, p.price])),
-  };
-  fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
-};
-
 const fetchStockPrices = async (symbols: string[]): Promise<PriceData[]> => {
   const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
   const results: PriceData[] = [];
 
   for (const symbol of symbols) {
     try {
+      // Get current quote
       const quote = await yf.quote(symbol);
+      const currentPrice = quote.regularMarketPrice ?? 0;
+
+      // Get historical data (last 8 days to get both day and week opens)
+      const today = new Date();
+      const eightDaysAgo = new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000);
+
+      const historical = await yf.historical(symbol, {
+        period1: eightDaysAgo,
+        period2: today,
+        interval: "1d",
+      });
+
+      // Today's open (most recent)
+      const todayData = historical[historical.length - 1];
+      const dayOpen = todayData?.open ?? currentPrice;
+
+      // Week ago open (7 days back)
+      const weekAgoData = historical[historical.length - 6] || historical[0];
+      const weekOpen = weekAgoData?.open ?? currentPrice;
 
       results.push({
         symbol: quote.symbol,
-        price: quote.regularMarketPrice ?? 0,
-        change: quote.regularMarketChange ?? 0,
-        changePercent: quote.regularMarketChangePercent ?? 0,
+        price: currentPrice,
+        change24h: quote.regularMarketChange ?? 0,
+        change24hPercent: quote.regularMarketChangePercent ?? 0,
+        dayOpen,
+        weekOpen,
         type: "stock",
         timestamp: Date.now(),
       });
@@ -79,54 +73,98 @@ const fetchStockPrices = async (symbols: string[]): Promise<PriceData[]> => {
 };
 
 const fetchCryptoPrices = async (symbols: string[]): Promise<PriceData[]> => {
-  const ids = symbols.map((s) => s.toLowerCase()).join(",");
+  const results: PriceData[] = [];
 
-  try {
-    const response = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`,
-    );
-    if (!response.ok) throw new Error("CoinGecko API error");
+  for (const symbol of symbols) {
+    try {
+      const id = symbol.toLowerCase();
 
-    const data = (await response.json()) as Record<string, { usd: number; usd_24h_change: number }>;
+      // Get current price with 24h change
+      const currentResponse = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`,
+      );
+      if (!currentResponse.ok) throw new Error("CoinGecko current API error");
 
-    return symbols
-      .map((symbol) => {
-        const id = symbol.toLowerCase();
-        if (!data[id]) {
-          console.error(`✗ ${symbol}: Not found on CoinGecko`);
-          return null;
-        }
-        return {
-          symbol: symbol.toUpperCase(),
-          price: data[id].usd,
-          change: 0,
-          changePercent: data[id].usd_24h_change,
-          type: "crypto" as const,
-          timestamp: Date.now(),
-        };
-      })
-      .filter((item): item is PriceData => item !== null);
-  } catch (error) {
-    console.error(`Crypto API error: ${(error as Error).message}`);
-    return [];
+      const currentData = (await currentResponse.json()) as Record<
+        string,
+        { usd: number; usd_24h_change: number }
+      >;
+      if (!currentData[id]) throw new Error("Not found on CoinGecko");
+
+      const currentPrice = currentData[id].usd;
+      const change24hPercent = currentData[id].usd_24h_change;
+
+      // Get historical data for day and week opens
+      const today = new Date();
+      const dateStr = today.toISOString().split("T")[0];
+      const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .split("T")[0];
+
+      const historyResponse = await fetch(
+        `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=8&interval=daily`,
+      );
+      if (!historyResponse.ok) throw new Error("CoinGecko history API error");
+
+      const historyData = (await historyResponse.json()) as {
+        prices: [number, number][];
+      };
+
+      // Extract day open (most recent non-current price)
+      const dayOpen =
+        historyData.prices.length > 1
+          ? historyData.prices[historyData.prices.length - 2][1]
+          : currentPrice;
+
+      // Extract week open (7 days back)
+      const weekOpen =
+        historyData.prices.length > 7
+          ? historyData.prices[historyData.prices.length - 8][1]
+          : historyData.prices[0][1];
+
+      const change24h = currentPrice - dayOpen;
+
+      results.push({
+        symbol: symbol.toUpperCase(),
+        price: currentPrice,
+        change24h,
+        change24hPercent,
+        dayOpen,
+        weekOpen,
+        type: "crypto",
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(`✗ ${symbol}: ${(error as Error).message}`);
+    }
   }
+
+  return results;
 };
 
-const formatPrice = (data: PriceData, previousPrice?: number): string => {
-  const sign24h = data.changePercent >= 0 ? "+" : "";
-  const change24h = `${sign24h}${data.changePercent.toFixed(2)}%`;
+const formatPrice = (data: PriceData): string => {
   const priceStr =
     data.type === "crypto" ? `$${data.price.toFixed(2)}` : `$${data.price.toFixed(2)}`;
 
-  let deltaStr = "";
-  if (previousPrice !== undefined && previousPrice > 0) {
-    const priceDelta = data.price - previousPrice;
-    const percentDelta = (priceDelta / previousPrice) * 100;
-    const signDelta = priceDelta >= 0 ? "+" : "";
-    deltaStr = ` │ ${signDelta}${priceDelta.toFixed(2)} (${signDelta}${percentDelta.toFixed(2)}%)`;
-  }
+  // Day comparison
+  const dayChange = data.price - data.dayOpen;
+  const dayChangePercent = data.dayOpen > 0 ? (dayChange / data.dayOpen) * 100 : 0;
+  const dayArrow = dayChange >= 0 ? "⬆️" : "⬇️";
+  const dayPercent =
+    dayChangePercent >= 0 ? `+${dayChangePercent.toFixed(2)}%` : `${dayChangePercent.toFixed(2)}%`;
 
-  return `${data.symbol.padEnd(8)} ${priceStr.padStart(12)} │ 24h: ${change24h.padStart(8)}${deltaStr}`;
+  // Week comparison
+  const weekChange = data.price - data.weekOpen;
+  const weekChangePercent = data.weekOpen > 0 ? (weekChange / data.weekOpen) * 100 : 0;
+  const weekArrow = weekChange >= 0 ? "⬆️" : "⬇️";
+  const weekPercent =
+    weekChangePercent >= 0
+      ? `+${weekChangePercent.toFixed(2)}%`
+      : `${weekChangePercent.toFixed(2)}%`;
+
+  return `${data.symbol.padEnd(8)} ${priceStr.padStart(12)}
+  Daily:   $${data.dayOpen.toFixed(2)} ${dayArrow} ${dayPercent}
+  Weekly:  $${data.weekOpen.toFixed(2)} ${weekArrow} ${weekPercent}`;
 };
 
 const main = async () => {
@@ -135,30 +173,24 @@ const main = async () => {
   try {
     const watchList = readWatchList(watchListPath);
     const allPrices: PriceData[] = [];
-    const snapshotPath = getSnapshotPath(watchListPath);
-    const previousSnapshot = readSnapshot(snapshotPath);
 
-    console.log(
-      `\n📊 Price Check ${previousSnapshot ? `(vs ${new Date(previousSnapshot.timestamp).toLocaleTimeString()})` : "(first check)"}\n`,
-    );
+    console.log(`\n📊 Price Check with Day/Week Comparison\n`);
 
     if (watchList.stocks && watchList.stocks.length > 0) {
       console.log("📈 Stocks:");
       const stockPrices = await fetchStockPrices(watchList.stocks);
       allPrices.push(...stockPrices);
       stockPrices.forEach((p) => {
-        const prevPrice = previousSnapshot?.prices[p.symbol];
-        console.log(`  ${formatPrice(p, prevPrice)}`);
+        console.log(`  ${formatPrice(p)}\n`);
       });
     }
 
     if (watchList.crypto && watchList.crypto.length > 0) {
-      console.log("\n🪙 Crypto:");
+      console.log("🪙 Crypto:");
       const cryptoPrices = await fetchCryptoPrices(watchList.crypto);
       allPrices.push(...cryptoPrices);
       cryptoPrices.forEach((p) => {
-        const prevPrice = previousSnapshot?.prices[p.symbol];
-        console.log(`  ${formatPrice(p, prevPrice)}`);
+        console.log(`  ${formatPrice(p)}\n`);
       });
     }
 
@@ -166,9 +198,6 @@ const main = async () => {
       console.log("No prices fetched. Check your watch list.");
       process.exit(1);
     }
-
-    // Save current snapshot
-    saveSnapshot(snapshotPath, allPrices);
   } catch (error) {
     console.error(`Error: ${(error as Error).message}`);
     process.exit(1);
