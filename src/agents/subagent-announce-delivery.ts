@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ConversationRef } from "../infra/outbound/session-binding-service.js";
+import { stringifyRouteThreadId } from "../plugin-sdk/channel-route.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 import { defaultRuntime } from "../runtime.js";
 import { isCronSessionKey } from "../sessions/session-key-utils.js";
@@ -19,13 +20,20 @@ import {
 import { buildAnnounceIdempotencyKey, resolveQueueAnnounceId } from "./announce-idempotency.js";
 import type { AgentInternalEvent } from "./internal-events.js";
 import {
+  getGatewayAgentResult,
+  hasMessagingToolDeliveryEvidence,
+  hasVisibleAgentPayload,
+} from "./pi-embedded-runner/delivery-evidence.js";
+import {
   callGateway,
   createBoundDeliveryRouter,
   getGlobalHookRunner,
   isEmbeddedPiRunActive,
-  loadConfig,
+  getRuntimeConfig,
+  isSteeringQueueMode,
   loadSessionStore,
   queueEmbeddedPiMessage,
+  resolvePiSteeringModeForQueueMode,
   resolveActiveEmbeddedRunSessionId,
   resolveAgentIdFromSessionKey,
   resolveConversationIdFromTargets,
@@ -44,14 +52,12 @@ import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
 
-export { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
-
 const DEFAULT_SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 const MAX_TIMER_SAFE_TIMEOUT_MS = 2_147_000_000;
 
 type SubagentAnnounceDeliveryDeps = {
   callGateway: typeof callGateway;
-  loadConfig: typeof loadConfig;
+  getRuntimeConfig: typeof getRuntimeConfig;
   getRequesterSessionActivity: (requesterSessionKey: string) => {
     sessionId?: string;
     isActive: boolean;
@@ -62,7 +68,7 @@ type SubagentAnnounceDeliveryDeps = {
 
 const defaultSubagentAnnounceDeliveryDeps: SubagentAnnounceDeliveryDeps = {
   callGateway,
-  loadConfig,
+  getRuntimeConfig,
   getRequesterSessionActivity: (requesterSessionKey: string) => {
     const sessionId =
       resolveActiveEmbeddedRunSessionId(requesterSessionKey) ??
@@ -115,7 +121,7 @@ function resolveBoundConversationOrigin(params: {
       ? conversationId
       : undefined) ??
     (params.requesterOrigin?.threadId != null && params.requesterOrigin.threadId !== ""
-      ? String(params.requesterOrigin.threadId)
+      ? stringifyRouteThreadId(params.requesterOrigin.threadId)
       : undefined);
   if (
     requesterTo &&
@@ -295,7 +301,7 @@ export async function resolveSubagentCompletionOrigin(params: {
   const accountId = normalizeAccountId(requesterOrigin?.accountId);
   const threadId =
     requesterOrigin?.threadId != null && requesterOrigin.threadId !== ""
-      ? String(requesterOrigin.threadId).trim()
+      ? stringifyRouteThreadId(requesterOrigin.threadId)
       : undefined;
   const conversationId =
     threadId ||
@@ -306,11 +312,29 @@ export async function resolveSubagentCompletionOrigin(params: {
   const requesterConversation: ConversationRef | undefined =
     channel && conversationId ? { channel, accountId, conversationId } : undefined;
 
-  const route = createBoundDeliveryRouter().resolveDestination({
+  const router = createBoundDeliveryRouter();
+  const childRoute = router.resolveDestination({
     eventKind: "task_completion",
     targetSessionKey: params.childSessionKey,
     requester: requesterConversation,
-    failClosed: false,
+    failClosed: true,
+  });
+  if (childRoute.mode === "bound" && childRoute.binding) {
+    return mergeDeliveryContext(
+      resolveBoundConversationOrigin({
+        bindingConversation: childRoute.binding.conversation,
+        requesterConversation,
+        requesterOrigin,
+      }),
+      requesterOrigin,
+    );
+  }
+
+  const route = router.resolveDestination({
+    eventKind: "task_completion",
+    targetSessionKey: params.requesterSessionKey,
+    requester: requesterConversation,
+    failClosed: true,
   });
   if (route.mode === "bound" && route.binding) {
     return mergeDeliveryContext(
@@ -357,12 +381,14 @@ export async function resolveSubagentCompletionOrigin(params: {
 }
 
 async function sendAnnounce(item: AnnounceQueueItem) {
-  const cfg = subagentAnnounceDeliveryDeps.loadConfig();
+  const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
   const announceTimeoutMs = resolveSubagentAnnounceTimeoutMs(cfg);
   const requesterIsSubagent = isInternalAnnounceRequesterSession(item.sessionKey);
   const origin = item.origin;
   const threadId =
-    origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
+    origin?.threadId != null && origin.threadId !== ""
+      ? stringifyRouteThreadId(origin.threadId)
+      : undefined;
   const deliveryTarget = !requesterIsSubagent
     ? resolveExternalBestEffortDeliveryTarget({
         channel: origin?.channel,
@@ -402,7 +428,7 @@ async function sendAnnounce(item: AnnounceQueueItem) {
 }
 
 export function loadRequesterSessionEntry(requesterSessionKey: string) {
-  const cfg = subagentAnnounceDeliveryDeps.loadConfig();
+  const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
   const canonicalKey = resolveRequesterStoreKey(cfg, requesterSessionKey);
   const agentId = resolveAgentIdFromSessionKey(canonicalKey);
   const storePath = resolveStorePath(cfg.session?.store, { agentId });
@@ -412,7 +438,7 @@ export function loadRequesterSessionEntry(requesterSessionKey: string) {
 }
 
 export function loadSessionEntryByKey(sessionKey: string) {
-  const cfg = subagentAnnounceDeliveryDeps.loadConfig();
+  const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
   const agentId = resolveAgentIdFromSessionKey(sessionKey);
   const storePath = resolveStorePath(cfg.session?.store, { agentId });
   const store = loadSessionStore(storePath);
@@ -456,11 +482,15 @@ async function maybeQueueSubagentAnnounce(params: {
     sessionEntry: entry,
   });
 
-  const shouldSteer = queueSettings.mode === "steer" || queueSettings.mode === "steer-backlog";
+  const shouldSteer = isSteeringQueueMode(queueSettings.mode);
   if (shouldSteer) {
     const steered = subagentAnnounceDeliveryDeps.queueEmbeddedPiMessage(
       sessionId,
       params.steerMessage,
+      {
+        steeringMode: resolvePiSteeringModeForQueueMode(queueSettings.mode),
+        ...(queueSettings.debounceMs !== undefined ? { debounceMs: queueSettings.debounceMs } : {}),
+      },
     );
     if (steered) {
       return "steered";
@@ -472,7 +502,10 @@ async function maybeQueueSubagentAnnounce(params: {
     queueSettings.mode === "collect" ||
     queueSettings.mode === "steer-backlog" ||
     queueSettings.mode === "interrupt";
-  if (isActive && (shouldFollowup || queueSettings.mode === "steer")) {
+  if (
+    isActive &&
+    (shouldFollowup || queueSettings.mode === "steer" || queueSettings.mode === "queue")
+  ) {
     const origin = resolveAnnounceOrigin(entry, params.requesterOrigin);
     const didQueue = enqueueAnnounce({
       key: buildAnnounceQueueKey(canonicalKey, origin),
@@ -526,43 +559,10 @@ export function extractThreadCompletionFallbackText(internalEvents?: AgentIntern
 }
 
 function hasVisibleGatewayAgentPayload(response: unknown): boolean {
-  const result =
-    response && typeof response === "object" && "result" in response
-      ? (response as { result?: unknown }).result
-      : undefined;
-  const payloads =
-    result && typeof result === "object" && "payloads" in result
-      ? (result as { payloads?: unknown }).payloads
-      : undefined;
-  if (!Array.isArray(payloads)) {
-    return false;
-  }
-  return payloads.some((payload) => {
-    if (!payload || typeof payload !== "object") {
-      return false;
-    }
-    const record = payload as {
-      text?: unknown;
-      mediaUrl?: unknown;
-      mediaUrls?: unknown;
-      presentation?: unknown;
-      interactive?: unknown;
-      channelData?: unknown;
-    };
-    const text = typeof record.text === "string" ? record.text.trim() : "";
-    const mediaUrl = typeof record.mediaUrl === "string" ? record.mediaUrl.trim() : "";
-    const mediaUrls = Array.isArray(record.mediaUrls)
-      ? record.mediaUrls.some((item) => typeof item === "string" && item.trim())
-      : false;
-    return Boolean(
-      text ||
-      mediaUrl ||
-      mediaUrls ||
-      record.presentation ||
-      record.interactive ||
-      record.channelData,
-    );
-  });
+  const result = getGatewayAgentResult(response);
+  return Boolean(
+    result && (hasVisibleAgentPayload(result) || hasMessagingToolDeliveryEvidence(result)),
+  );
 }
 
 async function sendCompletionFallback(params: {
@@ -646,7 +646,7 @@ async function sendSubagentAnnounceDirectly(params: {
       path: "none",
     };
   }
-  const cfg = subagentAnnounceDeliveryDeps.loadConfig();
+  const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
   const announceTimeoutMs = resolveSubagentAnnounceTimeoutMs(cfg);
   const canonicalRequesterSessionKey = resolveRequesterStoreKey(
     cfg,
@@ -693,11 +693,28 @@ async function sendSubagentAnnounceDirectly(params: {
         ? extractThreadCompletionFallbackText(params.internalEvents)
         : "";
     const requesterActivity = resolveRequesterSessionActivity(canonicalRequesterSessionKey);
+    const requesterEntry = loadRequesterSessionEntry(params.targetRequesterSessionKey).entry;
+    const requesterQueueSettings = resolveQueueSettings({
+      cfg,
+      channel:
+        requesterEntry?.channel ??
+        requesterEntry?.lastChannel ??
+        requesterEntry?.origin?.provider ??
+        requesterSessionOrigin?.channel ??
+        directOrigin?.channel,
+      sessionEntry: requesterEntry,
+    });
     if (params.expectsCompletionMessage && requesterActivity.sessionId) {
       const woke = requesterActivity.sessionId
         ? subagentAnnounceDeliveryDeps.queueEmbeddedPiMessage(
             requesterActivity.sessionId,
             params.triggerMessage,
+            {
+              steeringMode: "all",
+              ...(requesterQueueSettings.debounceMs !== undefined
+                ? { debounceMs: requesterQueueSettings.debounceMs }
+                : {}),
+            },
           )
         : false;
       if (woke) {

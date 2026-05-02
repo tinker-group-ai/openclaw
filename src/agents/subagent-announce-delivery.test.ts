@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  __testing as sessionBindingServiceTesting,
+  registerSessionBindingAdapter,
+} from "../infra/outbound/session-binding-service.js";
 import type { AgentInternalEvent } from "./internal-events.js";
 import {
   __testing,
   deliverSubagentAnnouncement,
   extractThreadCompletionFallbackText,
+  resolveSubagentCompletionOrigin,
 } from "./subagent-announce-delivery.js";
 import {
   callGateway as runtimeCallGateway,
@@ -14,6 +19,7 @@ import { resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
 
 afterEach(() => {
   resetAnnounceQueuesForTests();
+  sessionBindingServiceTesting.resetSessionBindingAdaptersForTests();
   __testing.setDepsForTest();
 });
 
@@ -54,7 +60,7 @@ async function deliverSlackThreadAnnouncement(params: {
       sessionId: params.sessionId,
       isActive: params.isActive,
     }),
-    loadConfig: () => ({}) as never,
+    getRuntimeConfig: () => ({}) as never,
     ...(params.queueEmbeddedPiMessage
       ? { queueEmbeddedPiMessage: params.queueEmbeddedPiMessage }
       : {}),
@@ -94,7 +100,7 @@ async function deliverDiscordDirectMessageCompletion(params: {
       sessionId: "requester-session-dm",
       isActive: false,
     }),
-    loadConfig: () => ({}) as never,
+    getRuntimeConfig: () => ({}) as never,
     ...(params.sendMessage ? { sendMessage: params.sendMessage } : {}),
   });
 
@@ -133,7 +139,7 @@ async function deliverTelegramDirectMessageCompletion(params: {
       sessionId: "requester-session-telegram",
       isActive: params.isActive === true,
     }),
-    loadConfig: () => ({}) as never,
+    getRuntimeConfig: () => ({}) as never,
     ...(params.queueEmbeddedPiMessage
       ? { queueEmbeddedPiMessage: params.queueEmbeddedPiMessage }
       : {}),
@@ -185,7 +191,7 @@ async function deliverSlackChannelAnnouncement(params: {
       sessionId: params.sessionId,
       isActive: params.isActive,
     }),
-    loadConfig: () => ({}) as never,
+    getRuntimeConfig: () => ({}) as never,
     ...(params.queueEmbeddedPiMessage
       ? { queueEmbeddedPiMessage: params.queueEmbeddedPiMessage }
       : {}),
@@ -270,6 +276,77 @@ describe("resolveAnnounceOrigin threaded route targets", () => {
   });
 });
 
+describe("resolveSubagentCompletionOrigin", () => {
+  it("resolves bound completion delivery from the requester session, not the child session", async () => {
+    registerSessionBindingAdapter({
+      channel: "discord",
+      accountId: "bot-alpha",
+      listBySession: (targetSessionKey: string) => {
+        if (targetSessionKey === "agent:worker:subagent:child") {
+          return [
+            {
+              bindingId: "discord:bot-alpha:child-window",
+              targetSessionKey,
+              targetKind: "subagent",
+              conversation: {
+                channel: "discord",
+                accountId: "bot-alpha",
+                conversationId: "child-window",
+              },
+              status: "active",
+              boundAt: 1,
+            },
+          ];
+        }
+        return [];
+      },
+      resolveByConversation: () => null,
+    });
+    registerSessionBindingAdapter({
+      channel: "discord",
+      accountId: "acct-1",
+      listBySession: (targetSessionKey: string) => {
+        if (targetSessionKey === "agent:main:main") {
+          return [
+            {
+              bindingId: "discord:acct-1:parent-main",
+              targetSessionKey,
+              targetKind: "session",
+              conversation: {
+                channel: "discord",
+                accountId: "acct-1",
+                conversationId: "parent-main",
+              },
+              status: "active",
+              boundAt: 1,
+            },
+          ];
+        }
+        return [];
+      },
+      resolveByConversation: () => null,
+    });
+
+    const origin = await resolveSubagentCompletionOrigin({
+      childSessionKey: "agent:worker:subagent:child",
+      requesterSessionKey: "agent:main:main",
+      requesterOrigin: {
+        channel: "discord",
+        accountId: "acct-1",
+        to: "channel:parent-main",
+      },
+      spawnMode: "session",
+      expectsCompletionMessage: true,
+    });
+
+    expect(origin).toEqual({
+      channel: "discord",
+      accountId: "acct-1",
+      to: "channel:parent-main",
+    });
+  });
+});
+
 describe("deliverSubagentAnnouncement queued delivery", () => {
   async function deliverQueuedAnnouncement(params: {
     requesterOrigin?: {
@@ -287,7 +364,7 @@ describe("deliverSubagentAnnouncement queued delivery", () => {
         sessionId: "paperclip-session",
         isActive: activityChecks++ === 0,
       }),
-      loadConfig: () =>
+      getRuntimeConfig: () =>
         ({
           messages: {
             queue: {
@@ -421,7 +498,10 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         path: "steered",
       }),
     );
-    expect(queueEmbeddedPiMessage).toHaveBeenCalledWith("requester-session-1", "child done");
+    expect(queueEmbeddedPiMessage).toHaveBeenCalledWith("requester-session-1", "child done", {
+      steeringMode: "all",
+      debounceMs: 500,
+    });
     expect(callGateway).not.toHaveBeenCalled();
   });
 
@@ -627,7 +707,14 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         path: "direct-fallback",
       }),
     );
-    expect(queueEmbeddedPiMessage).toHaveBeenCalledWith("requester-session-telegram", "child done");
+    expect(queueEmbeddedPiMessage).toHaveBeenCalledWith(
+      "requester-session-telegram",
+      "child done",
+      {
+        steeringMode: "all",
+        debounceMs: 500,
+      },
+    );
     expect(callGateway).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -740,6 +827,45 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         idempotencyKey: "announce-dm-fallback-empty",
       }),
     );
+  });
+
+  it("does not fallback when announce-agent delivered media through the message tool", async () => {
+    const callGateway = createGatewayMock({
+      result: {
+        payloads: [],
+        didSendViaMessagingTool: false,
+        messagingToolSentMediaUrls: ["/tmp/generated-night-drive.mp3"],
+      },
+    });
+    const sendMessage = createSendMessageMock();
+    const result = await deliverDiscordDirectMessageCompletion({
+      callGateway,
+      sendMessage,
+      internalEvents: [
+        {
+          type: "task_completion",
+          source: "music_generation",
+          childSessionKey: "music_generate:task-123",
+          childSessionId: "task-123",
+          announceType: "music generation task",
+          taskLabel: "night-drive synthwave",
+          status: "ok",
+          statusLabel: "completed successfully",
+          result: "Generated 1 track.\nMEDIA:/tmp/generated-night-drive.mp3",
+          mediaUrls: ["/tmp/generated-night-drive.mp3"],
+          replyInstruction: "Deliver the generated music through the message tool.",
+        },
+      ],
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        delivered: true,
+        path: "direct",
+      }),
+    );
+    expect(callGateway).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("uses a direct channel fallback when announce-agent returns no visible output", async () => {

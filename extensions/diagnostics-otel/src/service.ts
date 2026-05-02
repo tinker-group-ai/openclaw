@@ -217,7 +217,7 @@ function positiveFiniteNumber(value: number | undefined): number | undefined {
 }
 
 function assignPositiveNumberAttr(
-  attrs: Record<string, string | number>,
+  attrs: Record<string, string | number | boolean>,
   key: string,
   value: number | undefined,
 ): void {
@@ -225,6 +225,23 @@ function assignPositiveNumberAttr(
   if (normalized !== undefined) {
     attrs[key] = normalized;
   }
+}
+
+function assignModelCallSizeTimingAttrs(
+  attrs: Record<string, string | number | boolean>,
+  evt: {
+    requestPayloadBytes?: number;
+    responseStreamBytes?: number;
+    timeToFirstByteMs?: number;
+  },
+): void {
+  assignPositiveNumberAttr(attrs, "openclaw.model_call.request_bytes", evt.requestPayloadBytes);
+  assignPositiveNumberAttr(attrs, "openclaw.model_call.response_bytes", evt.responseStreamBytes);
+  assignPositiveNumberAttr(
+    attrs,
+    "openclaw.model_call.time_to_first_byte_ms",
+    evt.timeToFirstByteMs,
+  );
 }
 
 function assignGenAiSpanIdentityAttrs(
@@ -812,6 +829,27 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         unit: "ms",
         description: "Model call duration",
       });
+      const modelCallRequestBytesHistogram = meter.createHistogram(
+        "openclaw.model_call.request_bytes",
+        {
+          unit: "By",
+          description: "UTF-8 byte size of sanitized model request payloads",
+        },
+      );
+      const modelCallResponseBytesHistogram = meter.createHistogram(
+        "openclaw.model_call.response_bytes",
+        {
+          unit: "By",
+          description: "UTF-8 byte size of streamed model response events",
+        },
+      );
+      const modelCallTimeToFirstByteHistogram = meter.createHistogram(
+        "openclaw.model_call.time_to_first_byte_ms",
+        {
+          unit: "ms",
+          description: "Elapsed time before the first streamed model response event",
+        },
+      );
       const toolExecutionDurationHistogram = meter.createHistogram(
         "openclaw.tool.execution.duration_ms",
         {
@@ -850,6 +888,38 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         unit: "1",
         description: "Diagnostic memory pressure events",
       });
+      const livenessWarningCounter = meter.createCounter("openclaw.liveness.warning", {
+        unit: "1",
+        description: "Diagnostic liveness warning events",
+      });
+      const livenessEventLoopDelayP99Histogram = meter.createHistogram(
+        "openclaw.liveness.event_loop_delay_p99_ms",
+        {
+          unit: "ms",
+          description: "P99 event-loop delay reported by diagnostic liveness warnings",
+        },
+      );
+      const livenessEventLoopDelayMaxHistogram = meter.createHistogram(
+        "openclaw.liveness.event_loop_delay_max_ms",
+        {
+          unit: "ms",
+          description: "Maximum event-loop delay reported by diagnostic liveness warnings",
+        },
+      );
+      const livenessEventLoopUtilizationHistogram = meter.createHistogram(
+        "openclaw.liveness.event_loop_utilization",
+        {
+          unit: "1",
+          description: "Event-loop utilization reported by diagnostic liveness warnings",
+        },
+      );
+      const livenessCpuCoreRatioHistogram = meter.createHistogram(
+        "openclaw.liveness.cpu_core_ratio",
+        {
+          unit: "1",
+          description: "CPU core ratio reported by diagnostic liveness warnings",
+        },
+      );
       const telemetryExporterCounter = meter.createCounter("openclaw.telemetry.exporter.events", {
         unit: "1",
         description: "Diagnostic telemetry exporter lifecycle and failure events",
@@ -1700,6 +1770,23 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         "gen_ai.request.model": lowCardinalityAttr(evt.model),
         ...(errorType ? { "error.type": errorType } : {}),
       });
+      const recordModelCallSizeTimingMetrics = (
+        evt: Extract<DiagnosticEventPayload, { type: "model.call.completed" | "model.call.error" }>,
+        attrs: ReturnType<typeof modelCallMetricAttrs>,
+      ) => {
+        const requestPayloadBytes = positiveFiniteNumber(evt.requestPayloadBytes);
+        if (requestPayloadBytes !== undefined) {
+          modelCallRequestBytesHistogram.record(requestPayloadBytes, attrs);
+        }
+        const responseStreamBytes = positiveFiniteNumber(evt.responseStreamBytes);
+        if (responseStreamBytes !== undefined) {
+          modelCallResponseBytesHistogram.record(responseStreamBytes, attrs);
+        }
+        const timeToFirstByteMs = positiveFiniteNumber(evt.timeToFirstByteMs);
+        if (timeToFirstByteMs !== undefined) {
+          modelCallTimeToFirstByteHistogram.record(timeToFirstByteMs, attrs);
+        }
+      };
 
       const recordModelCallStarted = (
         evt: Extract<DiagnosticEventPayload, { type: "model.call.started" }>,
@@ -1733,7 +1820,9 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         evt: Extract<DiagnosticEventPayload, { type: "model.call.completed" }>,
         metadata: DiagnosticEventMetadata,
       ) => {
-        modelCallDurationHistogram.record(evt.durationMs, modelCallMetricAttrs(evt));
+        const metricAttrs = modelCallMetricAttrs(evt);
+        modelCallDurationHistogram.record(evt.durationMs, metricAttrs);
+        recordModelCallSizeTimingMetrics(evt, metricAttrs);
         genAiOperationDurationHistogram.record(
           evt.durationMs / 1000,
           genAiModelCallMetricAttrs(evt),
@@ -1752,6 +1841,7 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         if (evt.transport) {
           spanAttrs["openclaw.transport"] = evt.transport;
         }
+        assignModelCallSizeTimingAttrs(spanAttrs, evt);
         assignOtelModelContentAttributes(
           spanAttrs,
           evt as unknown as Record<string, unknown>,
@@ -1773,10 +1863,15 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         metadata: DiagnosticEventMetadata,
       ) => {
         const errorType = lowCardinalityAttr(evt.errorCategory, "other");
-        modelCallDurationHistogram.record(evt.durationMs, {
+        const metricAttrs = {
           ...modelCallMetricAttrs(evt),
           "openclaw.errorCategory": errorType,
-        });
+          ...(evt.failureKind
+            ? { "openclaw.failureKind": lowCardinalityAttr(evt.failureKind, "other") }
+            : {}),
+        };
+        modelCallDurationHistogram.record(evt.durationMs, metricAttrs);
+        recordModelCallSizeTimingMetrics(evt, metricAttrs);
         genAiOperationDurationHistogram.record(
           evt.durationMs / 1000,
           genAiModelCallMetricAttrs(evt, errorType),
@@ -1790,6 +1885,9 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
           "openclaw.errorCategory": errorType,
           "error.type": errorType,
         };
+        if (evt.failureKind) {
+          spanAttrs["openclaw.failureKind"] = lowCardinalityAttr(evt.failureKind, "other");
+        }
         assignGenAiModelCallAttrs(spanAttrs, evt);
         if (evt.api) {
           spanAttrs["openclaw.api"] = evt.api;
@@ -1797,6 +1895,7 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         if (evt.transport) {
           spanAttrs["openclaw.transport"] = evt.transport;
         }
+        assignModelCallSizeTimingAttrs(spanAttrs, evt);
         assignOtelModelContentAttributes(
           spanAttrs,
           evt as unknown as Record<string, unknown>,
@@ -1821,7 +1920,11 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         evt: Extract<
           DiagnosticEventPayload,
           {
-            type: "tool.execution.started" | "tool.execution.completed" | "tool.execution.error";
+            type:
+              | "tool.execution.started"
+              | "tool.execution.completed"
+              | "tool.execution.error"
+              | "tool.execution.blocked";
           }
         >,
       ): Record<string, string | number | boolean> => ({
@@ -1918,6 +2021,27 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         span.end(evt.ts);
       };
 
+      const recordToolExecutionBlocked = (
+        evt: Extract<DiagnosticEventPayload, { type: "tool.execution.blocked" }>,
+        metadata: DiagnosticEventMetadata,
+      ) => {
+        if (!tracesEnabled) {
+          return;
+        }
+        const spanAttrs: Record<string, string | number | boolean> = {
+          ...toolExecutionBaseAttrs(evt),
+          "openclaw.outcome": "blocked",
+          "openclaw.deniedReason": lowCardinalityAttr(evt.deniedReason, "other"),
+        };
+        addRunAttrs(spanAttrs, evt);
+        const span = spanWithDuration("openclaw.tool.execution", spanAttrs, 0, {
+          parentContext: activeTrustedParentContext(evt, metadata),
+          endTimeMs: evt.ts,
+        });
+        setSpanAttrs(span, spanAttrs);
+        span.end(evt.ts);
+      };
+
       const recordExecProcessCompleted = (
         evt: Extract<DiagnosticEventPayload, { type: "exec.process.completed" }>,
       ) => {
@@ -1964,6 +2088,68 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
         evt: Extract<DiagnosticEventPayload, { type: "diagnostic.heartbeat" }>,
       ) => {
         queueDepthHistogram.record(evt.queued, { "openclaw.channel": "heartbeat" });
+      };
+
+      const recordLivenessWarning = (
+        evt: Extract<DiagnosticEventPayload, { type: "diagnostic.liveness.warning" }>,
+      ) => {
+        const reason = evt.reasons.join(":");
+        const attrs = {
+          "openclaw.liveness.reason": lowCardinalityAttr(reason, "unknown"),
+        };
+        livenessWarningCounter.add(1, attrs);
+        queueDepthHistogram.record(evt.queued, { "openclaw.channel": "liveness" });
+        if (evt.eventLoopDelayP99Ms !== undefined) {
+          livenessEventLoopDelayP99Histogram.record(evt.eventLoopDelayP99Ms, attrs);
+        }
+        if (evt.eventLoopDelayMaxMs !== undefined) {
+          livenessEventLoopDelayMaxHistogram.record(evt.eventLoopDelayMaxMs, attrs);
+        }
+        if (evt.eventLoopUtilization !== undefined) {
+          livenessEventLoopUtilizationHistogram.record(evt.eventLoopUtilization, attrs);
+        }
+        if (evt.cpuCoreRatio !== undefined) {
+          livenessCpuCoreRatioHistogram.record(evt.cpuCoreRatio, attrs);
+        }
+        if (!tracesEnabled) {
+          return;
+        }
+        const spanAttrs: Record<string, string | number> = {
+          ...attrs,
+          "openclaw.liveness.active": evt.active,
+          "openclaw.liveness.waiting": evt.waiting,
+          "openclaw.liveness.queued": evt.queued,
+          "openclaw.liveness.interval_ms": evt.intervalMs,
+          ...(evt.eventLoopDelayP99Ms !== undefined
+            ? { "openclaw.liveness.event_loop_delay_p99_ms": evt.eventLoopDelayP99Ms }
+            : {}),
+          ...(evt.eventLoopDelayMaxMs !== undefined
+            ? { "openclaw.liveness.event_loop_delay_max_ms": evt.eventLoopDelayMaxMs }
+            : {}),
+          ...(evt.eventLoopUtilization !== undefined
+            ? { "openclaw.liveness.event_loop_utilization": evt.eventLoopUtilization }
+            : {}),
+          ...(evt.cpuUserMs !== undefined
+            ? { "openclaw.liveness.cpu_user_ms": evt.cpuUserMs }
+            : {}),
+          ...(evt.cpuSystemMs !== undefined
+            ? { "openclaw.liveness.cpu_system_ms": evt.cpuSystemMs }
+            : {}),
+          ...(evt.cpuTotalMs !== undefined
+            ? { "openclaw.liveness.cpu_total_ms": evt.cpuTotalMs }
+            : {}),
+          ...(evt.cpuCoreRatio !== undefined
+            ? { "openclaw.liveness.cpu_core_ratio": evt.cpuCoreRatio }
+            : {}),
+        };
+        const span = spanWithDuration("openclaw.liveness.warning", spanAttrs, 0, {
+          endTimeMs: evt.ts,
+        });
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: reason,
+        });
+        span.end(evt.ts);
       };
 
       const recordTelemetryExporter = (
@@ -2029,14 +2215,22 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
             case "session.state":
               recordSessionState(evt);
               return;
+            case "session.long_running":
+            case "session.stalled":
+              return;
             case "session.stuck":
               recordSessionStuck(evt);
               return;
             case "run.attempt":
               recordRunAttempt(evt);
               return;
+            case "run.progress":
+              return;
             case "diagnostic.heartbeat":
               recordHeartbeat(evt);
+              return;
+            case "diagnostic.liveness.warning":
+              recordLivenessWarning(evt);
               return;
             case "run.started":
               recordRunStarted(evt, metadata);
@@ -2073,6 +2267,9 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
               return;
             case "tool.execution.error":
               recordToolExecutionError(evt, metadata);
+              return;
+            case "tool.execution.blocked":
+              recordToolExecutionBlocked(evt, metadata);
               return;
             case "exec.process.completed":
               recordExecProcessCompleted(evt);

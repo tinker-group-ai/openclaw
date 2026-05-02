@@ -47,8 +47,8 @@ function collectPluginSourceEntries(packageJson) {
   return packageEntries.length > 0 ? packageEntries : ["./index.ts"];
 }
 
-function shouldStageBundledPluginRuntimeDependencies(packageJson) {
-  return packageJson?.openclaw?.bundle?.stageRuntimeDependencies === true;
+function shouldIncludeBundledPluginInCore(packageJson) {
+  return packageJson?.openclaw?.bundle?.includeInCore !== false;
 }
 
 function collectTopLevelPublicSurfaceEntries(pluginDir) {
@@ -115,6 +115,9 @@ export function collectBundledPluginBuildEntries(params = {}) {
     if (!shouldBuildBundledCluster(dirent.name, env, { packageJson })) {
       continue;
     }
+    if (!shouldIncludeBundledPluginInCore(packageJson)) {
+      continue;
+    }
 
     entries.push({
       id: dirent.name,
@@ -165,24 +168,4 @@ export function listBundledPluginPackArtifacts(params = {}) {
   }
 
   return [...artifacts].toSorted((left, right) => left.localeCompare(right));
-}
-
-export function listBundledPluginRuntimeDependencies(params = {}) {
-  const runtimeDependencies = new Set();
-
-  for (const { packageJson } of collectBundledPluginBuildEntries(params)) {
-    if (!shouldStageBundledPluginRuntimeDependencies(packageJson)) {
-      continue;
-    }
-
-    for (const dependencyName of Object.keys(packageJson?.dependencies ?? {})) {
-      runtimeDependencies.add(dependencyName);
-    }
-
-    for (const dependencyName of Object.keys(packageJson?.optionalDependencies ?? {})) {
-      runtimeDependencies.add(dependencyName);
-    }
-  }
-
-  return [...runtimeDependencies].toSorted((left, right) => left.localeCompare(right));
 }

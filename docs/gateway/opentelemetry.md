@@ -7,7 +7,7 @@ read_when:
   - You need the exact metric names, span names, or attribute shapes to build dashboards or alerts
 ---
 
-OpenClaw exports diagnostics through the bundled `diagnostics-otel` plugin
+OpenClaw exports diagnostics through the official `diagnostics-otel` plugin
 using **OTLP/HTTP (protobuf)**. Any collector or backend that accepts OTLP/HTTP
 works without code changes. For local file logs and how to read them, see
 [Logging](/logging).
@@ -26,6 +26,12 @@ works without code changes. For local file logs and how to read them, see
   enabled, so the in-process cost stays near zero by default.
 
 ## Quick start
+
+For packaged installs, install the plugin first:
+
+```bash
+openclaw plugins install clawhub:@openclaw/diagnostics-otel
+```
 
 ```json5
 {
@@ -150,6 +156,14 @@ When any subkey is enabled, model and tool spans get bounded, redacted
 - **Logs:** OTLP logs respect `logging.level` (file log level). They use the
   diagnostic log-record redaction path, not console formatting. High-volume
   installs should prefer OTLP collector sampling/filtering over local sampling.
+- **File-log correlation:** JSONL file logs include top-level `traceId`,
+  `spanId`, `parentSpanId`, and `traceFlags` when the log call carries a valid
+  diagnostic trace context, which lets log processors join local log lines with
+  exported spans.
+- **Request correlation:** Gateway HTTP requests and WebSocket frames create an
+  internal request trace scope. Logs and diagnostic events inside that scope
+  inherit the request trace by default, while agent run and model-call spans are
+  created as children so provider `traceparent` headers stay on the same trace.
 
 ## Exported metrics
 
@@ -161,6 +175,10 @@ When any subkey is enabled, model and tool spans get bounded, redacted
 - `openclaw.context.tokens` (histogram, attrs: `openclaw.context`, `openclaw.channel`, `openclaw.provider`, `openclaw.model`)
 - `gen_ai.client.token.usage` (histogram, GenAI semantic-conventions metric, attrs: `gen_ai.token.type` = `input`/`output`, `gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`)
 - `gen_ai.client.operation.duration` (histogram, seconds, GenAI semantic-conventions metric, attrs: `gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, optional `error.type`)
+- `openclaw.model_call.duration_ms` (histogram, attrs: `openclaw.provider`, `openclaw.model`, `openclaw.api`, `openclaw.transport`, plus `openclaw.errorCategory` and `openclaw.failureKind` on classified errors)
+- `openclaw.model_call.request_bytes` (histogram, UTF-8 byte size of the final model request payload; no raw payload content)
+- `openclaw.model_call.response_bytes` (histogram, UTF-8 byte size of streamed model response events; no raw response content)
+- `openclaw.model_call.time_to_first_byte_ms` (histogram, elapsed time before the first streamed response event)
 
 ### Message flow
 
@@ -180,9 +198,33 @@ When any subkey is enabled, model and tool spans get bounded, redacted
 - `openclaw.queue.depth` (histogram, attrs: `openclaw.lane` or `openclaw.channel=heartbeat`)
 - `openclaw.queue.wait_ms` (histogram, attrs: `openclaw.lane`)
 - `openclaw.session.state` (counter, attrs: `openclaw.state`, `openclaw.reason`)
-- `openclaw.session.stuck` (counter, attrs: `openclaw.state`)
-- `openclaw.session.stuck_age_ms` (histogram, attrs: `openclaw.state`)
+- `openclaw.session.stuck` (counter, attrs: `openclaw.state`; emitted only for stale session bookkeeping with no active work)
+- `openclaw.session.stuck_age_ms` (histogram, attrs: `openclaw.state`; emitted only for stale session bookkeeping with no active work)
 - `openclaw.run.attempt` (counter, attrs: `openclaw.attempt`)
+
+### Session liveness telemetry
+
+`diagnostics.stuckSessionWarnMs` is the no-progress age threshold for session
+liveness diagnostics. A `processing` session does not age toward this threshold
+while OpenClaw observes reply, tool, status, block, or ACP runtime progress.
+Typing keepalives are not counted as progress, so a silent model or harness can
+still be detected.
+
+OpenClaw classifies sessions by the work it can still observe:
+
+- `session.long_running`: active embedded work, model calls, or tool calls are
+  still making progress.
+- `session.stalled`: active work exists, but the active run has not reported
+  recent progress.
+- `session.stuck`: stale session bookkeeping with no active work. This is the
+  only liveness classification that releases the affected session lane.
+
+Only `session.stuck` emits the `openclaw.session.stuck` counter, the
+`openclaw.session.stuck_age_ms` histogram, and the `openclaw.session.stuck`
+span. Repeated `session.stuck` diagnostics back off while the session remains
+unchanged, so dashboards should alert on sustained increases rather than every
+heartbeat tick. For the config knob and defaults, see
+[Configuration reference](/gateway/configuration-reference#diagnostics).
 
 ### Harness lifecycle
 
@@ -212,6 +254,8 @@ When any subkey is enabled, model and tool spans get bounded, redacted
 - `openclaw.model.call`
   - `gen_ai.system` by default, or `gen_ai.provider.name` when the latest GenAI semantic conventions are opted in
   - `gen_ai.request.model`, `gen_ai.operation.name`, `openclaw.provider`, `openclaw.model`, `openclaw.api`, `openclaw.transport`
+  - `openclaw.errorCategory` and optional `openclaw.failureKind` on errors
+  - `openclaw.model_call.request_bytes`, `openclaw.model_call.response_bytes`, `openclaw.model_call.time_to_first_byte_ms`
   - `openclaw.provider.request_id_hash` (bounded SHA-based hash of the upstream provider request id; raw ids are not exported)
 - `openclaw.harness.run`
   - `openclaw.harness.id`, `openclaw.harness.plugin`, `openclaw.outcome`, `openclaw.provider`, `openclaw.model`, `openclaw.channel`
@@ -263,8 +307,8 @@ to them directly without OTLP export.
 **Queue and session**
 
 - `queue.lane.enqueue` / `queue.lane.dequeue`
-- `session.state` / `session.stuck`
-- `run.attempt`
+- `session.state` / `session.long_running` / `session.stalled` / `session.stuck`
+- `run.attempt` / `run.progress`
 - `diagnostic.heartbeat` (aggregate counters: webhooks/queue/session)
 
 **Harness lifecycle**

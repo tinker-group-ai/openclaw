@@ -1,23 +1,21 @@
 import { resetModelCatalogCache } from "../agents/model-catalog.js";
 import { disposeAllSessionMcpRuntimes } from "../agents/pi-bundle-mcp-tools.js";
-import { getActiveEmbeddedRunCount } from "../agents/pi-embedded-runner/runs.js";
+import { getActiveEmbeddedRunCount } from "../agents/pi-embedded-runner/run-state.js";
+import { abortEmbeddedPiRun } from "../agents/pi-embedded-runner/runs.js";
 import { getTotalPendingReplies } from "../auto-reply/reply/dispatcher-registry.js";
 import type { CliDeps } from "../cli/deps.types.js";
-import { resolveAgentMaxConcurrent, resolveSubagentMaxConcurrent } from "../config/agent-limits.js";
 import { isRestartEnabled } from "../config/commands.flags.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { startGmailWatcherWithLogs } from "../hooks/gmail-watcher-lifecycle.js";
-import { stopGmailWatcher } from "../hooks/gmail-watcher.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import { resetDirectoryCache } from "../infra/outbound/target-resolver.js";
 import {
   deferGatewayRestartUntilIdle,
   emitGatewayRestart,
+  resolveGatewayRestartDeferralTimeoutMs,
   setGatewaySigusr1RestartPolicy,
 } from "../infra/restart.js";
-import { setCommandLaneConcurrency, getTotalQueueSize } from "../process/command-queue.js";
-import { CommandLane } from "../process/lanes.js";
+import { getTotalQueueSize } from "../process/command-queue.js";
 import {
   activateSecretsRuntimeSnapshot,
   clearSecretsRuntimeSnapshot,
@@ -30,7 +28,8 @@ import type { ChannelKind } from "./config-reload-plan.js";
 import { startGatewayConfigReloader, type GatewayReloadPlan } from "./config-reload.js";
 import { resolveHooksConfig } from "./hooks.js";
 import { buildGatewayCronService, type GatewayCronState } from "./server-cron.js";
-import type { HookClientIpConfig } from "./server-http.js";
+import { applyGatewayLaneConcurrency } from "./server-lanes.js";
+import { markGatewayModelCatalogStaleForReload } from "./server-model-catalog.js";
 import {
   type GatewayChannelManager,
   startGatewayChannelHealthMonitor,
@@ -43,7 +42,8 @@ import {
   type SharedGatewaySessionGenerationState,
 } from "./server-shared-auth-generation.js";
 import type { ActivateRuntimeSecrets } from "./server-startup-config.js";
-import { resolveHookClientIpConfig } from "./server/hooks.js";
+import { resolveHookClientIpConfig } from "./server/hook-client-ip-config.js";
+import type { HookClientIpConfig } from "./server/hooks-request-handler.js";
 
 type GatewayHotReloadState = {
   hooksConfig: ReturnType<typeof resolveHooksConfig>;
@@ -58,9 +58,31 @@ type GatewayReloadLog = {
   warn: (msg: string) => void;
 };
 
+export type GatewayPluginReloadResult = {
+  restartChannels: ReadonlySet<ChannelKind>;
+  activeChannels: ReadonlySet<ChannelKind>;
+};
+
 const MCP_RUNTIME_RELOAD_DISPOSE_TIMEOUT_MS = 5_000;
 const CHANNEL_RELOAD_DEFERRAL_POLL_MS = 500;
 const CHANNEL_RELOAD_STILL_PENDING_WARN_MS = 30_000;
+
+function abortActiveAgentRunsAfterConfigRecovery(params: {
+  reason: string;
+  logReload: GatewayReloadLog;
+}) {
+  const aborted = abortEmbeddedPiRun(undefined, { mode: "all" });
+  if (!aborted) {
+    return;
+  }
+  params.logReload.warn(
+    `config recovery aborted active agent run(s) after reload-${params.reason}`,
+  );
+}
+
+export const __testing = {
+  abortActiveAgentRunsAfterConfigRecovery,
+};
 
 async function disposeMcpRuntimesWithTimeout(params: {
   dispose: () => Promise<void>;
@@ -92,6 +114,11 @@ type GatewayReloadHandlerParams = {
   setState: (state: GatewayHotReloadState) => void;
   startChannel: (name: ChannelKind) => Promise<void>;
   stopChannel: (name: ChannelKind) => Promise<void>;
+  reloadPlugins: (params: {
+    nextConfig: OpenClawConfig;
+    changedPaths: readonly string[];
+    beforeReplace: (channels: ReadonlySet<ChannelKind>) => Promise<void>;
+  }) => Promise<GatewayPluginReloadResult>;
   logHooks: {
     info: (msg: string) => void;
     warn: (msg: string) => void;
@@ -225,6 +252,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
       )
     ) {
       resetModelCatalogCache();
+      markGatewayModelCatalogStaleForReload();
     }
 
     if (plan.reloadHooks) {
@@ -241,6 +269,41 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     }
 
     resetDirectoryCache();
+
+    const channelsToRestart = new Set(plan.restartChannels);
+    const channelsStoppedBeforePluginReload = new Set<ChannelKind>();
+    let activePluginChannelsAfterReload: ReadonlySet<ChannelKind> | null = null;
+    const shouldSkipChannelRestart = () =>
+      isTruthyEnvValue(process.env.OPENCLAW_SKIP_CHANNELS) ||
+      isTruthyEnvValue(process.env.OPENCLAW_SKIP_PROVIDERS);
+    if (plan.reloadPlugins) {
+      const stopChannelsBeforePluginReplace = async (channels: ReadonlySet<ChannelKind>) => {
+        for (const channel of channels) {
+          channelsToRestart.add(channel);
+        }
+        if (channelsToRestart.size === 0 || shouldSkipChannelRestart()) {
+          return;
+        }
+        await waitForActiveWorkBeforeChannelReload(channelsToRestart, nextConfig);
+        for (const channel of channelsToRestart) {
+          if (channelsStoppedBeforePluginReload.has(channel)) {
+            continue;
+          }
+          params.logChannels.info(`stopping ${channel} channel before plugin reload`);
+          await params.stopChannel(channel);
+          channelsStoppedBeforePluginReload.add(channel);
+        }
+      };
+      const pluginReloadResult = await params.reloadPlugins({
+        nextConfig,
+        changedPaths: plan.changedPaths,
+        beforeReplace: stopChannelsBeforePluginReplace,
+      });
+      for (const channel of pluginReloadResult.restartChannels) {
+        channelsToRestart.add(channel);
+      }
+      activePluginChannelsAfterReload = pluginReloadResult.activeChannels;
+    }
 
     if (plan.restartCron) {
       state.cronState.cron.stop();
@@ -270,6 +333,10 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     }
 
     if (plan.restartGmailWatcher) {
+      const [{ stopGmailWatcher }, { startGmailWatcherWithLogs }] = await Promise.all([
+        import("../hooks/gmail-watcher.js"),
+        import("../hooks/gmail-watcher-lifecycle.js"),
+      ]);
       await stopGmailWatcher().catch((err) => {
         params.logHooks.warn(`gmail watcher stop failed during reload: ${String(err)}`);
       });
@@ -281,30 +348,32 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
       });
     }
 
-    if (plan.restartChannels.size > 0) {
-      if (
-        isTruthyEnvValue(process.env.OPENCLAW_SKIP_CHANNELS) ||
-        isTruthyEnvValue(process.env.OPENCLAW_SKIP_PROVIDERS)
-      ) {
+    if (channelsToRestart.size > 0) {
+      if (shouldSkipChannelRestart()) {
         params.logChannels.info(
           "skipping channel reload (OPENCLAW_SKIP_CHANNELS=1 or OPENCLAW_SKIP_PROVIDERS=1)",
         );
       } else {
-        await waitForActiveWorkBeforeChannelReload(plan.restartChannels, nextConfig);
+        if (!plan.reloadPlugins) {
+          await waitForActiveWorkBeforeChannelReload(channelsToRestart, nextConfig);
+        }
         const restartChannel = async (name: ChannelKind) => {
+          if (plan.reloadPlugins && activePluginChannelsAfterReload?.has(name) === false) {
+            return;
+          }
           params.logChannels.info(`restarting ${name} channel`);
-          await params.stopChannel(name);
+          if (!channelsStoppedBeforePluginReload.has(name)) {
+            await params.stopChannel(name);
+          }
           await params.startChannel(name);
         };
-        for (const channel of plan.restartChannels) {
+        for (const channel of channelsToRestart) {
           await restartChannel(channel);
         }
       }
     }
 
-    setCommandLaneConcurrency(CommandLane.Cron, nextConfig.cron?.maxConcurrentRuns ?? 1);
-    setCommandLaneConcurrency(CommandLane.Main, resolveAgentMaxConcurrent(nextConfig));
-    setCommandLaneConcurrency(CommandLane.Subagent, resolveSubagentMaxConcurrent(nextConfig));
+    applyGatewayLaneConcurrency(nextConfig);
 
     if (plan.hotReasons.length > 0) {
       params.logReload.info(`config hot reload applied (${plan.hotReasons.join(", ")})`);
@@ -346,7 +415,9 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
 
       deferGatewayRestartUntilIdle({
         getPendingCount: () => getActiveCounts().totalActive,
-        maxWaitMs: nextConfig.gateway?.reload?.deferralTimeoutMs,
+        maxWaitMs: resolveGatewayRestartDeferralTimeoutMs(
+          nextConfig.gateway?.reload?.deferralTimeoutMs,
+        ),
         hooks: {
           onReady: () => {
             restartPending = false;
@@ -399,6 +470,7 @@ export function startManagedGatewayConfigReloader(params: ManagedGatewayConfigRe
     setState: params.setState,
     startChannel: params.startChannel,
     stopChannel: params.stopChannel,
+    reloadPlugins: params.reloadPlugins,
     logHooks: params.logHooks,
     logChannels: params.logChannels,
     logCron: params.logCron,
@@ -419,11 +491,13 @@ export function startManagedGatewayConfigReloader(params: ManagedGatewayConfigRe
       await params.recoverSnapshot({ snapshot, reason: `reload-${reason}` }),
     promoteSnapshot: async (snapshot, _reason) => await params.promoteSnapshot(snapshot),
     onRecovered: ({ reason, snapshot, recoveredSnapshot }) => {
+      abortActiveAgentRunsAfterConfigRecovery({ reason, logReload: params.logReload });
       enqueueConfigRecoveryNotice({
         cfg: recoveredSnapshot.config,
         phase: "reload",
         reason: `reload-${reason}`,
         configPath: snapshot.path,
+        issues: [...snapshot.issues, ...snapshot.legacyIssues],
       });
     },
     subscribeToWrites: params.subscribeToWrites,

@@ -8,9 +8,10 @@ type GatewayRequestContextClient = GatewayClient & {
   usesSharedGatewayAuth?: boolean;
 };
 
-export type GatewayRequestContextParams = {
+type GatewayRequestContextParams = {
   deps: GatewayRequestContext["deps"];
   runtimeState: Pick<GatewayServerLiveState, "cronState">;
+  getRuntimeConfig: GatewayRequestContext["getRuntimeConfig"];
   execApprovalManager: GatewayRequestContext["execApprovalManager"];
   pluginApprovalManager: GatewayRequestContext["pluginApprovalManager"];
   loadGatewayModelCatalog: GatewayRequestContext["loadGatewayModelCatalog"];
@@ -73,6 +74,7 @@ export function createGatewayRequestContext(
     get cronStorePath() {
       return params.runtimeState.cronState.storePath;
     },
+    getRuntimeConfig: params.getRuntimeConfig,
     execApprovalManager: params.execApprovalManager,
     pluginApprovalManager: params.pluginApprovalManager,
     loadGatewayModelCatalog: params.loadGatewayModelCatalog,

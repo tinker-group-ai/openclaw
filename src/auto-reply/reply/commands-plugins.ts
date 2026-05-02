@@ -11,17 +11,17 @@ import type { ConfigSnapshotForInstallPersist } from "../../cli/plugins-install-
 import { refreshPluginRegistryAfterConfigMutation } from "../../cli/plugins-registry-refresh.js";
 import {
   readConfigFileSnapshot,
+  replaceConfigFile,
   validateConfigObjectWithPlugins,
-  writeConfigFile,
 } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../../config/types.plugins.js";
 import { resolveArchiveKind } from "../../infra/archive.js";
 import { parseClawHubPluginSpec } from "../../infra/clawhub.js";
 import { installPluginFromClawHub } from "../../plugins/clawhub.js";
+import { installPluginFromGitSpec, parseGitPluginSpec } from "../../plugins/git-install.js";
 import { installPluginFromNpmSpec, installPluginFromPath } from "../../plugins/install.js";
 import { loadInstalledPluginIndexInstallRecords } from "../../plugins/installed-plugin-index-records.js";
-import { clearPluginManifestRegistryCache } from "../../plugins/manifest-registry.js";
 import type { PluginRecord } from "../../plugins/registry.js";
 import {
   buildAllPluginInspectReports,
@@ -180,7 +180,6 @@ async function installPluginFromPluginsCommand(params: {
     if (!result.ok) {
       return { ok: false, error: result.error };
     }
-    clearPluginManifestRegistryCache();
     const source: "archive" | "path" = resolveArchiveKind(resolved) ? "archive" : "path";
     await persistPluginInstall({
       snapshot: params.snapshot,
@@ -199,6 +198,36 @@ async function installPluginFromPluginsCommand(params: {
     return { ok: false, error: `Path not found: ${resolved}` };
   }
 
+  const gitPrefix = params.raw.trim().toLowerCase().startsWith("git:");
+  const gitSpec = parseGitPluginSpec(params.raw);
+  if (gitPrefix && !gitSpec) {
+    return { ok: false, error: `unsupported git: plugin spec: ${params.raw}` };
+  }
+  if (gitSpec) {
+    const result = await installPluginFromGitSpec({
+      spec: params.raw,
+      logger: createPluginInstallLogger(),
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    await persistPluginInstall({
+      snapshot: params.snapshot,
+      pluginId: result.pluginId,
+      install: {
+        source: "git",
+        spec: params.raw,
+        installPath: result.targetDir,
+        version: result.version,
+        resolvedAt: result.git.resolvedAt,
+        gitUrl: result.git.url,
+        gitRef: result.git.ref,
+        gitCommit: result.git.commit,
+      },
+    });
+    return { ok: true, pluginId: result.pluginId };
+  }
+
   const clawhubSpec = parseClawHubPluginSpec(params.raw);
   if (clawhubSpec) {
     const result = await installPluginFromClawHub({
@@ -208,7 +237,6 @@ async function installPluginFromPluginsCommand(params: {
     if (!result.ok) {
       return { ok: false, error: result.error };
     }
-    clearPluginManifestRegistryCache();
     await persistPluginInstall({
       snapshot: params.snapshot,
       pluginId: result.pluginId,
@@ -235,7 +263,6 @@ async function installPluginFromPluginsCommand(params: {
       logger: createPluginInstallLogger(),
     });
     if (clawhubResult.ok) {
-      clearPluginManifestRegistryCache();
       await persistPluginInstall({
         snapshot: params.snapshot,
         pluginId: clawhubResult.pluginId,
@@ -266,7 +293,6 @@ async function installPluginFromPluginsCommand(params: {
   if (!result.ok) {
     return { ok: false, error: result.error };
   }
-  clearPluginManifestRegistryCache();
   const installRecord = buildNpmInstallRecordFields({
     spec: params.raw,
     installPath: result.targetDir,
@@ -398,7 +424,7 @@ export const handlePluginsCommand: CommandHandler = async (params, allowTextComm
     return {
       shouldContinue: false,
       reply: {
-        text: `🔌 Installed plugin "${installed.pluginId}". Restart the gateway to load plugins.`,
+        text: `🔌 Installed plugin "${installed.pluginId}". Gateway restart will load the new plugin source.`,
       },
     };
   }
@@ -486,7 +512,10 @@ export const handlePluginsCommand: CommandHandler = async (params, allowTextComm
       },
     };
   }
-  await writeConfigFile(validated.config);
+  await replaceConfigFile({
+    nextConfig: validated.config,
+    afterWrite: { mode: "auto" },
+  });
   let registryWarning: string | undefined;
   await refreshPluginRegistryAfterConfigMutation({
     config: validated.config,
@@ -502,7 +531,7 @@ export const handlePluginsCommand: CommandHandler = async (params, allowTextComm
     shouldContinue: false,
     reply: {
       text:
-        `🔌 Plugin "${plugin.id}" ${pluginsCommand.action}d in ${loaded.path}. Restart the gateway to apply.` +
+        `🔌 Plugin "${plugin.id}" ${pluginsCommand.action}d in ${loaded.path}. Gateway reload will apply it to new agent turns.` +
         (registryWarning ? `\n${registryWarning}` : ""),
     },
   };
