@@ -14,6 +14,11 @@ when finished, **announce** their result back to the requester chat
 channel. Each sub-agent run is tracked as a
 [background task](/automation/tasks).
 
+For the security model behind delegation, see
+[Multi-agent and sub-agent boundaries](/gateway/security#multi-agent-and-sub-agent-boundaries).
+Sub-agents are useful isolation and workflow units, but they are not a hostile
+multi-tenant authorization boundary inside one shared Gateway.
+
 Primary goals:
 
 - Parallelize "research / long task / slow tool" work without blocking the main run.
@@ -46,6 +51,8 @@ session**:
 /subagents steer <id|#> <message>
 /subagents spawn <agentId> <task> [--model <model>] [--thinking <level>]
 ```
+
+Use top-level [`/steer <message>`](/tools/steer) to steer the current requester session's active run. Use `/subagents steer <id|#> <message>` when the target is a child run.
 
 `/subagents info` shows run metadata (status, timestamps, session id,
 transcript path, cleanup). Use `sessions_history` for a bounded,
@@ -80,8 +87,10 @@ requester chat when the run finishes.
 
   </Accordion>
   <Accordion title="Manual-spawn delivery resilience">
-    - OpenClaw tries direct `agent` delivery first with a stable idempotency key.
-    - If direct delivery fails, it falls back to queue routing.
+    - OpenClaw hands completions back to the requester session through an `agent` turn with a stable idempotency key.
+    - If the requester run is still active, OpenClaw first tries to wake/steer that run instead of starting a second visible reply path.
+    - If the requester-agent completion handoff fails or produces no visible output, OpenClaw treats delivery as failed and falls back to queue routing/retry. It does not raw-send the child result directly to the external chat.
+    - If direct handoff cannot be used, it falls back to queue routing.
     - If queue routing is still not available, the announce is retried with a short exponential backoff before final give-up.
     - Completion delivery keeps the resolved requester route: thread-bound or conversation-bound completion routes win when available; if the completion origin only provides a channel, OpenClaw fills the missing target/account from the requester session's resolved route (`lastChannel` / `lastTo` / `lastAccountId`) so direct delivery still works.
 

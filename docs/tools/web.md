@@ -153,6 +153,18 @@ Codex-capable models can optionally use the provider-native Responses `web_searc
 
 If native Codex search is enabled but the current model is not Codex-capable, OpenClaw keeps the normal managed `web_search` behavior.
 
+## Network safety
+
+Managed `web_search` provider calls use OpenClaw's guarded fetch path. For
+trusted provider API hosts, OpenClaw allows Surge, Clash, and sing-box fake-IP
+DNS answers in `198.18.0.0/15` and `fc00::/7` only for that provider hostname.
+Other private, loopback, link-local, and metadata destinations remain blocked.
+
+This automatic allowance does not apply to arbitrary `web_fetch` URLs. For
+`web_fetch`, enable `tools.web.fetch.ssrfPolicy.allowRfc2544BenchmarkRange` and
+`tools.web.fetch.ssrfPolicy.allowIpv6UniqueLocalRange` explicitly only when your
+trusted proxy owns those synthetic ranges.
+
 ## Setting up web search
 
 Provider lists in docs and setup flows are alphabetical. Auto-detection keeps a
@@ -219,12 +231,13 @@ fallbacks after its dedicated web-search config and `GEMINI_API_KEY`. See the
 provider pages for examples.
 
 `tools.web.search.provider` is validated against the web-search provider ids
-declared by bundled and installed plugin manifests. A typo such as `"brvae"`
-fails config validation instead of silently falling back to auto-detection. If a
-configured provider only has stale plugin evidence, such as a leftover
-`plugins.entries.<plugin>` block after uninstalling a third-party plugin,
-OpenClaw keeps startup resilient and reports a warning so you can reinstall the
-plugin or run `openclaw doctor --fix` to clean up the stale config.
+declared by bundled and installed plugin manifests, plus known installable
+provider plugins. A typo such as `"brvae"` fails config validation instead of
+silently falling back to auto-detection. If the configured provider is known but
+the owning plugin is unavailable, OpenClaw keeps startup resilient and reports a
+warning so you can run `openclaw doctor --fix` to install or enable the plugin.
+The same warning behavior applies to stale plugin evidence, such as a leftover
+`plugins.entries.<plugin>` block after uninstalling a third-party plugin.
 
 `web_fetch` fallback provider selection is separate:
 
