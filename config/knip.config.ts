@@ -9,6 +9,8 @@ const rootEntries = [
   "src/index.ts!",
   "src/entry.ts!",
   "src/cli/daemon-cli.ts!",
+  "src/agents/code-mode.worker.ts!",
+  "src/infra/kysely-node-sqlite.ts!",
   "src/infra/warning-filter.ts!",
   "src/infra/command-explainer/index.ts!",
   bundledPluginFile("telegram", "src/audit.ts", "!"),
@@ -30,10 +32,12 @@ const bundledPluginEntries = [
 
 const bundledPluginIgnoredRuntimeDependencies = [
   "@agentclientprotocol/claude-agent-acp",
+  "@a2ui/lit",
   "@azure/identity",
   "@clawdbot/lobster",
   "@discordjs/opus",
   "@homebridge/ciao",
+  "@lit/context",
   "@matrix-org/matrix-sdk-crypto-wasm",
   "@mozilla/readability",
   "@openai/codex",
@@ -42,6 +46,7 @@ const bundledPluginIgnoredRuntimeDependencies = [
   "@zed-industries/codex-acp",
   "jiti",
   "json5",
+  "lit",
   "linkedom",
   "openclaw",
   "pdfjs-dist",
@@ -120,7 +125,7 @@ const config = {
     "**/*.test-helpers.ts",
     "**/*.test-mocks.ts",
     "**/*.test-utils.ts",
-    "src/gateway/live-image-probe.ts",
+    "test/helpers/live-image-probe.ts",
     "src/secrets/credential-matrix.ts",
     "src/agents/claude-cli-runner.ts",
     "src/agents/pi-auth-json.ts",
@@ -169,7 +174,7 @@ const config = {
       // Bundled plugins often load their public surface via string specifiers in
       // `index.ts` contracts, so Knip needs these convention-based entry files.
       entry: bundledPluginEntries,
-      project: ["index.ts!", "src/**/*.ts!"],
+      project: ["index.ts!", "src/**/*.{js,mjs,ts}!"],
       ignoreDependencies: bundledPluginIgnoredRuntimeDependencies,
     },
   },

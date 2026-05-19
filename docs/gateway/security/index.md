@@ -126,65 +126,6 @@ Use this as the quick model when triaging risk:
 | Node pairing and node commands                            | Operator-level remote execution on paired devices | "Remote device control should be treated as untrusted user access by default" |
 | `gateway.nodes.pairing.autoApproveCidrs`                  | Opt-in trusted-network node enrollment policy     | "A disabled-by-default allowlist is an automatic pairing vulnerability"       |
 
-## Multi-agent and sub-agent boundaries
-
-OpenClaw can run many agents inside one Gateway, but those agents still sit
-inside the same trusted-operator boundary unless you split the deployment by
-Gateway, OS user, host, or sandbox. Treat sub-agent delegation as a tool-policy
-and sandboxing decision, not as a hostile multi-tenant authorization layer.
-
-Expected behavior inside one trusted Gateway:
-
-- An authenticated operator can route work to sessions and agents they are
-  allowed to use by config.
-- `sessionKey`, session id, labels, and sub-agent session keys select
-  conversation context. They are not bearer credentials and are not per-user
-  authorization boundaries.
-- Sub-agents have separate sessions by default. Native `sessions_spawn` uses
-  isolated context unless the caller explicitly asks for `context: "fork"`;
-  thread-bound follow-up sessions use forked context because they continue the
-  conversation thread.
-- A forked sub-agent can see the transcript context it was deliberately given.
-  That is expected. It becomes a security issue only if it receives context that
-  policy said it must not receive.
-- Tool access comes from the effective profile, channel/group/provider policy,
-  sandbox policy, per-agent policy, and the sub-agent restriction layer. A broad
-  tool profile intentionally gives broad capability.
-- Sub-agent auth profiles are resolved by target agent id. Main-agent auth can
-  be available as fallback unless you split credentials/deployments; do not rely
-  on sub-agent identity alone for strong secret isolation.
-
-What counts as a real boundary bypass:
-
-- `sessions_spawn` works even though the effective tool policy denied it.
-- A child runs unsandboxed even though the requester is sandboxed or the call
-  required `sandbox: "require"`.
-- A child receives session tools, system tools, or target-agent access that the
-  resolved config denied.
-- A leaf sub-agent controls, kills, steers, or messages sibling sessions that it
-  did not spawn.
-- A sub-agent sees transcript, memory, credentials, or files that were excluded
-  by an explicit policy or sandbox boundary.
-- A Gateway/API caller without the required Gateway auth or trusted-proxy/device
-  identity can trigger agent or tool execution.
-
-Hardening knobs:
-
-- Keep `sessions_spawn` denied unless an agent truly needs delegation.
-- Prefer `tools.profile: "messaging"` or another narrow profile for agents that
-  talk to external channels.
-- Set `agents.list[].subagents.requireAgentId: true` for agents that may spawn
-  work, so target selection is explicit.
-- Keep `agents.defaults.subagents.allowAgents` and
-  `agents.list[].subagents.allowAgents` narrow; avoid `["*"]` for agents that
-  receive untrusted input.
-- Use `tools.subagents.tools.allow` to make sub-agent tools allow-only instead
-  of inheriting a broad parent profile.
-- For workflows that must remain sandboxed, use `sessions_spawn` with
-  `sandbox: "require"`.
-- Use separate gateways, OS users, hosts, browser profiles, and credentials when
-  agents or users are mutually untrusted.
-
 ## Not vulnerabilities by design
 
 <Accordion title="Common findings that are out of scope">
@@ -198,10 +139,6 @@ a real boundary bypass is demonstrated:
 - Claims that classify normal operator read-path access (for example
   `sessions.list` / `sessions.preview` / `chat.history`) as IDOR in a
   shared-gateway setup.
-- Claims that treat expected `context: "fork"` transcript inheritance as a
-  boundary bypass when the requester explicitly forked that context.
-- Claims that treat broad sub-agent tool access as a bypass when the configured
-  profile or allowlist intentionally granted those tools.
 - Localhost-only deployment findings (for example HSTS on a loopback-only
   gateway).
 - Discord inbound webhook signature findings for inbound paths that do not
@@ -283,6 +220,7 @@ Advisory triage guidance:
 
 - **Inbound access** (DM policies, group policies, allowlists): can strangers trigger the bot?
 - **Tool blast radius** (elevated tools + open rooms): could prompt injection turn into shell/file/network actions?
+- **Exec filesystem drift**: are mutating filesystem tools denied while `exec`/`process` remain available without sandbox filesystem constraints?
 - **Exec approval drift** (`security=full`, `autoAllowSkills`, interpreter allowlists without `strictInlineEval`): are host-exec guardrails still doing what you think they are?
   - `security="full"` is a broad posture warning, not proof of a bug. It is the chosen default for trusted personal-assistant setups; tighten it only when your threat model needs approval or allowlist guardrails.
 - **Network exposure** (Gateway bind/auth, Tailscale Serve/Funnel, weak/short auth tokens).
@@ -364,13 +302,16 @@ does not extend to node-role Control UI sessions.
 
 `openclaw security audit` raises `config.insecure_or_dangerous_flags` when
 known insecure/dangerous debug switches are enabled. Keep these unset in
-production.
+production. Each enabled flag is reported as its own finding. If audit
+suppressions are configured, `security.audit.suppressions.active` remains in the
+active audit output even when matching findings move to `suppressedFindings`.
 
 <AccordionGroup>
   <Accordion title="Flags tracked by the audit today">
     - `gateway.controlUi.allowInsecureAuth=true`
     - `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true`
     - `gateway.controlUi.dangerouslyDisableDeviceAuth=true`
+    - `security.audit.suppressions configured (<count>)`
     - `hooks.gmail.allowUnsafeExternalContent=true`
     - `hooks.mappings[<index>].allowUnsafeExternalContent=true`
     - `tools.exec.applyPatch.workspaceOnly=false`
@@ -935,10 +876,11 @@ Doctor can generate one for you: `openclaw doctor --generate-gateway-token`.
 `gateway.remote.token` and `gateway.remote.password` are client credential sources. They do **not** protect local WS access by themselves. Local call paths can use `gateway.remote.*` as fallback only when `gateway.auth.*` is unset. If `gateway.auth.token` or `gateway.auth.password` is explicitly configured via SecretRef and unresolved, resolution fails closed (no remote fallback masking).
 </Note>
 Optional: pin remote TLS with `gateway.remote.tlsFingerprint` when using `wss://`.
-Plaintext `ws://` is loopback-only by default. For trusted private-network
-paths, set `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1` on the client process as
-break-glass. This is intentionally process environment only, not an
-`openclaw.json` config key.
+Plaintext `ws://` is accepted for loopback, private IP literals, `.local`, and
+Tailnet `*.ts.net` gateway URLs. For other trusted private-DNS names, set
+`OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1` on the client process as break-glass.
+This is intentionally process environment only, not an `openclaw.json` config
+key.
 Mobile pairing and Android manual or scanned gateway routes are stricter:
 cleartext is accepted for loopback, but private-LAN, link-local, `.local`, and
 dotless hostnames must use TLS unless you explicitly opt into the trusted
@@ -989,9 +931,9 @@ configured HTTP auth mode.
 Important boundary note:
 
 - Gateway HTTP bearer auth is effectively all-or-nothing operator access.
-- Treat credentials that can call `/v1/chat/completions`, `/v1/responses`, or `/api/channels/*` as full-access operator secrets for that gateway.
+- Treat credentials that can call `/v1/chat/completions`, `/v1/responses`, plugin routes such as `/api/v1/admin/rpc`, or `/api/channels/*` as full-access operator secrets for that gateway.
 - On the OpenAI-compatible HTTP surface, shared-secret bearer auth restores the full default operator scopes (`operator.admin`, `operator.approvals`, `operator.pairing`, `operator.read`, `operator.talk.secrets`, `operator.write`) and owner semantics for agent turns; narrower `x-openclaw-scopes` values do not reduce that shared-secret path.
-- Per-request scope semantics on HTTP only apply when the request comes from an identity-bearing mode such as trusted proxy auth or `gateway.auth.mode="none"` on a private ingress.
+- Per-request scope semantics on HTTP only apply when the request comes from an identity-bearing mode such as trusted proxy auth, or from an explicitly no-auth private ingress.
 - In those identity-bearing modes, omitting `x-openclaw-scopes` falls back to the normal operator default scope set; send the header explicitly when you want a narrower scope set.
 - `/tools/invoke` follows the same shared-secret rule: token/password bearer auth is treated as full operator access there too, while identity-bearing modes still honor declared scopes.
 - Do not share these credentials with untrusted callers; prefer separate gateways per trust boundary.

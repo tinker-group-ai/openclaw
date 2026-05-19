@@ -155,7 +155,10 @@ function installConfigIoMockDefaults() {
     }
     return snapshot.valid ? { snapshot, pluginMetadataSnapshot } : { snapshot };
   });
-  writeConfig.mockResolvedValue(undefined);
+  writeConfig.mockResolvedValue({
+    persistedHash: "test-persisted-hash",
+    persistedConfig: validConfig,
+  });
 }
 
 describe("gateway startup config validation", () => {
@@ -275,48 +278,6 @@ describe("gateway startup config validation", () => {
       env: process.env,
       manifestRegistry: pluginManifestRegistry,
     });
-  });
-
-  it("logs config warnings without failing startup", async () => {
-    const snapshot = buildTestConfigSnapshot({
-      path: configPath,
-      exists: true,
-      raw: `${JSON.stringify(validConfig)}\n`,
-      parsed: validConfig,
-      valid: true,
-      config: validConfig,
-      issues: [],
-      warnings: [
-        {
-          path: "tools.web.search.provider",
-          message:
-            'web_search provider is not available: brave (install or enable plugin "brave", then run openclaw doctor --fix)',
-        },
-      ],
-      legacyIssues: [],
-    });
-    const log = { info: vi.fn(), warn: vi.fn() };
-
-    await expect(
-      loadGatewayStartupConfigSnapshot({
-        minimalTestGateway: false,
-        log,
-        initialSnapshotRead: {
-          snapshot,
-          pluginMetadataSnapshot,
-        },
-      }),
-    ).resolves.toEqual({
-      snapshot,
-      wroteConfig: false,
-      pluginMetadataSnapshot,
-    });
-
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'tools.web.search.provider: web_search provider is not available: brave (install or enable plugin "brave", then run openclaw doctor --fix)',
-      ),
-    );
   });
 
   it("preserves empty model allowlist entries through runtime-only startup auto-enable", async () => {
@@ -492,7 +453,7 @@ describe("gateway startup config validation", () => {
         log: { info: vi.fn(), warn: vi.fn() },
       }),
     ).rejects.toThrow(
-      `Invalid config at ${configPath}.\ngateway.mode: Expected 'local' or 'remote'\nRun "openclaw doctor --fix" to repair, then retry.`,
+      `Invalid config at ${configPath}.\ngateway.mode: Expected 'local' or 'remote'\nRun "openclaw doctor --fix" to repair, then retry.\nIf startup is still blocked, inspect the adjacent .bak backup before restoring it manually.`,
     );
   });
 

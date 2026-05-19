@@ -11,6 +11,8 @@ import {
 } from "./plugin-control-plane-context.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
 
+type CurrentPluginMetadataSnapshotState = ReturnType<typeof getCurrentPluginMetadataSnapshotState>;
+
 export function resolvePluginMetadataControlPlaneFingerprint(
   config?: OpenClawConfig,
   options: Omit<ResolvePluginControlPlaneContextParams, "config"> = {},
@@ -64,12 +66,28 @@ export function clearCurrentPluginMetadataSnapshot(): void {
   clearCurrentPluginMetadataSnapshotState();
 }
 
+export function captureCurrentPluginMetadataSnapshotState(): CurrentPluginMetadataSnapshotState {
+  return getCurrentPluginMetadataSnapshotState();
+}
+
+export function restoreCurrentPluginMetadataSnapshotState(
+  state: CurrentPluginMetadataSnapshotState,
+): void {
+  setCurrentPluginMetadataSnapshotState(
+    state.snapshot,
+    state.configFingerprint,
+    state.compatiblePolicyHashes,
+    state.compatibleConfigFingerprints,
+  );
+}
+
 export function getCurrentPluginMetadataSnapshot(
   params: {
     config?: OpenClawConfig;
     env?: NodeJS.ProcessEnv;
     workspaceDir?: string;
     allowWorkspaceScopedSnapshot?: boolean;
+    requireDefaultDiscoveryContext?: boolean;
   } = {},
 ): PluginMetadataSnapshot | undefined {
   const {
@@ -106,6 +124,25 @@ export function getCurrentPluginMetadataSnapshot(
       configFingerprint === requestedConfigFingerprint ||
       snapshot.configFingerprint === requestedConfigFingerprint ||
       compatibleFingerprints.has(requestedConfigFingerprint);
+    if (!fingerprintMatches) {
+      return undefined;
+    }
+  }
+  if (params.requireDefaultDiscoveryContext === true) {
+    const defaultDiscoveryConfigFingerprint = resolvePluginMetadataControlPlaneFingerprint(
+      {},
+      {
+        env: params.env,
+        index: snapshot.index,
+        policyHash: snapshot.policyHash,
+        workspaceDir: requestedWorkspaceDir,
+      },
+    );
+    const compatibleFingerprints = new Set(compatibleConfigFingerprints ?? []);
+    const fingerprintMatches =
+      configFingerprint === defaultDiscoveryConfigFingerprint ||
+      snapshot.configFingerprint === defaultDiscoveryConfigFingerprint ||
+      compatibleFingerprints.has(defaultDiscoveryConfigFingerprint);
     if (!fingerprintMatches) {
       return undefined;
     }

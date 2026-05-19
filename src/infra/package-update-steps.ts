@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathExists } from "./fs-safe.js";
 import { readPackageVersion } from "./package-json.js";
+import { movePathWithCopyFallback } from "./replace-file.js";
 import {
   collectInstalledGlobalPackageErrors,
   globalInstallArgs,
@@ -95,7 +96,9 @@ function isUnambiguousNpmPrefixGlobalRoot(globalRoot: string | null): boolean {
 function resolveStagedNpmTargetLayout(
   installTarget: ResolvedGlobalInstallTarget,
 ): NpmGlobalPrefixLayout | null {
-  const targetLayout = resolveNpmGlobalPrefixLayoutFromGlobalRoot(installTarget.globalRoot);
+  const targetLayout = resolveNpmGlobalPrefixLayoutFromGlobalRoot(installTarget.globalRoot, {
+    allowDirectNodeModulesRoot: installTarget.directNodeModulesRoot === true,
+  });
   if (!targetLayout) {
     return null;
   }
@@ -149,7 +152,9 @@ async function prepareStagedNpmInstall(
   } catch (err) {
     const targetLayout =
       installTarget.manager === "npm"
-        ? resolveNpmGlobalPrefixLayoutFromGlobalRoot(installTarget.globalRoot)
+        ? resolveNpmGlobalPrefixLayoutFromGlobalRoot(installTarget.globalRoot, {
+            allowDirectNodeModulesRoot: installTarget.directNodeModulesRoot === true,
+          })
         : null;
     return {
       stagedInstall: null,
@@ -263,7 +268,9 @@ async function swapStagedNpmInstall(params: {
   packageName: string;
 }): Promise<PackageUpdateStepResult> {
   const startedAt = Date.now();
-  const targetLayout = resolveNpmGlobalPrefixLayoutFromGlobalRoot(params.installTarget.globalRoot);
+  const targetLayout = resolveNpmGlobalPrefixLayoutFromGlobalRoot(params.installTarget.globalRoot, {
+    allowDirectNodeModulesRoot: params.installTarget.directNodeModulesRoot === true,
+  });
   const targetPackageRoot = params.installTarget.packageRoot;
   if (!targetLayout || !targetPackageRoot) {
     return {
@@ -283,16 +290,26 @@ async function swapStagedNpmInstall(params: {
   try {
     await fs.mkdir(targetLayout.globalRoot, { recursive: true });
     if (await pathExists(targetPackageRoot)) {
-      await fs.rename(targetPackageRoot, backupRoot);
+      await movePathWithCopyFallback({
+        from: targetPackageRoot,
+        sourceHardlinks: "reject",
+        to: backupRoot,
+      });
       movedExisting = true;
     }
-    await fs.rename(params.stage.packageRoot, targetPackageRoot);
-    movedStaged = true;
-    await replaceNpmBinShims({
-      stageLayout: params.stage.layout,
-      targetLayout,
-      packageName: params.packageName,
+    await movePathWithCopyFallback({
+      from: params.stage.packageRoot,
+      sourceHardlinks: "reject",
+      to: targetPackageRoot,
     });
+    movedStaged = true;
+    if (params.installTarget.directNodeModulesRoot !== true) {
+      await replaceNpmBinShims({
+        stageLayout: params.stage.layout,
+        targetLayout,
+        packageName: params.packageName,
+      });
+    }
     if (movedExisting) {
       await removePathBestEffort(backupRoot);
     }
@@ -312,7 +329,11 @@ async function swapStagedNpmInstall(params: {
       await removePathBestEffort(targetPackageRoot);
     }
     if (movedExisting) {
-      await fs.rename(backupRoot, targetPackageRoot).catch(() => undefined);
+      await movePathWithCopyFallback({
+        from: backupRoot,
+        sourceHardlinks: "reject",
+        to: targetPackageRoot,
+      }).catch(() => undefined);
     }
     return {
       name: "global install swap",
